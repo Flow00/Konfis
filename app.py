@@ -14,7 +14,7 @@ from Mapping import _get_key
 # ═════════════════════════════════════════════════════════════════════════════
 #  CONFIG
 # ═════════════════════════════════════════════════════════════════════════════
-DEBUG = True
+DEBUG = False
 TEST  = False
 
 from cryptography.fernet import Fernet

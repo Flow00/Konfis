@@ -1753,9 +1753,9 @@ def render_railway_sizing_tab():
         )
     with c16:
         # Crane span = portée du pont entre les 2 chemins de roulement.
-        # N'apparaît que pour les portiques Olsen (poutre supplémentaire à
-        # dimensionner). En "Customer", la box reste masquée et la valeur nulle.
-        if appui_type == "Olsen":
+        # N'apparaît que pour un portique Olsen AVEC pont SUSPENDU (la cross
+        # beam de suspension n'existe que dans ce cas). Sinon, valeur nulle.
+        if appui_type == "Olsen" and is_suspendu:
             _lcs = "Crane span [mm] ❌" if not ss.get("rs_crane_span","") else "Crane span [mm]"
             crane_span = _ni(_lcs, "rs_crane_span")
         else:
@@ -2037,11 +2037,13 @@ def render_railway_sizing_tab():
                 _res["col_config"] = col_config
 
                 # ── CROSS BEAM (poutre de suspension du portique) ────────────
+                # UNIQUEMENT pour un pont SUSPENDU (le pont posé roule sur les
+                # rails, pas de poutre de suspension à dimensionner).
                 # Une poutre par portique (n_appuis_total / 2), longueur =
                 # crane_span + 2×500 mm, chargée par 2× R_max du CR espacées
                 # de crane_span. Sélection même type que la colonne, flèche L/600.
                 _crane_span = float(_res.get("crane_span_mm", 0) or 0)
-                if _crane_span > 0:
+                if is_suspendu and _crane_span > 0:
                     _R_max = float(_res.get("R_max_kN", 0.0))
                     _xb = compute_cross_beam(
                         col_type        = col_type,

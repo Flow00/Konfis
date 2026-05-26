@@ -2648,8 +2648,6 @@ def render_railway_sizing_tab():
         # (posé comme suspendu).
         _lcs = "Crane span [mm] ❌" if not ss.get("rs_crane_span","") else "Crane span [mm]"
         crane_span = _ni(_lcs, "rs_crane_span")
-    if not _safe(crane_span):
-        st.warning("⚠️ Renseigner Crane span (portée du pont entre rails) — requis pour le calcul.")
 
     # ── Colonnes Olsen (si appui = Olsen) ───────────────────────────────────
     # Init hidden defaults before any widget.
@@ -2788,8 +2786,7 @@ def render_railway_sizing_tab():
         # au dimensionnement (cross beam en suspendu) et au rendu 3D du pont.
         if not _safe(crane_span):
             errs.append(
-                "Crane span requis : portée du pont entre les 2 chemins de "
-                "roulement (utilisée pour la cross beam et la géométrie du pont)."
+                "Crane span requis"
             )
 
         # Cohérence dimensionnelle : entraxe appuis (= span) ≤ longueur totale

@@ -232,3 +232,18 @@ IZ_IPE = {
     750:6960.0,
 }
 IZ_TABLES = {"HEA": IZ_HEA, "HEB": IZ_HEB, "IPE": IZ_IPE}
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  REINFORCEMENT ANGLES — LTB strengthening cornières (equal-leg L a×a×t, S235)
+#  Welded on the TOP flange (one each side) to raise Iy AND Iz and improve the
+#  lateral-torsional buckling resistance of the runway beam.
+#  (label, A_cm2, I_own_cm4, e_cm, mass_kg/m)
+# ═════════════════════════════════════════════════════════════════════════════
+ANGLE_CATALOGUE = [
+    ("50×50×5",     4.75,   11.3, 1.43,  3.73),
+    ("70×70×7",     9.31,   43.2, 2.01,  7.31),
+    ("100×100×10", 19.00,  180.0, 2.87, 14.92),
+    ("150×150×10", 29.00,  637.2, 4.12, 22.77),
+]
+LTB_REINFORCE_THRESHOLD = 0.85

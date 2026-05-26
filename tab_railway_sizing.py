@@ -1,6 +1,6 @@
 # tab_railway_sizing.py
 import streamlit as st
-import re, math, base64
+import re, math, base64, json
 from datetime import date
 
 from railway_constants import (
@@ -24,6 +24,7 @@ from railway_constants import (
     PRICE_BOULONNERIE_COL, M_DIVERS_COL_MARGIN,
     EMBASE_TF_THIN, EMBASE_TF_THICK, TF_THIN_LIMIT, TF_THICK_LIMIT,
     EMBASE_OVERHANG, TF_PLAQUE_SUP_CAP, HORIZ_SCAN_POINTS,
+    ANGLE_CATALOGUE, LTB_REINFORCE_THRESHOLD,
 )
 
 ss = st.session_state
@@ -408,9 +409,9 @@ def compute_load_cases(rv1, som1, rv2, som2, space_btw, portee, nbre_pont, nbre_
 #
 #  Returns (χ_LT, λ_LT, Mcr_kNm, util_LTB) where util = M_max / (χ_LT·Wy·fy)
 # ─────────────────────────────────────────────────────────────────────────────
-def _check_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm):
+def _check_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm, load_pos="top"):
     """
-    LTB check for rolled I/H section.
+    LTB check for rolled I/H section (EN 1993-1-1 annex F, general formula).
     size_mm  : section height h [mm]
     b_mm     : flange width [mm]
     tf_mm    : flange thickness [mm]
@@ -418,6 +419,11 @@ def _check_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm):
     Iz_cm4   : weak-axis inertia [cm⁴]  (from IZ_TABLES)
     M_max_Nmm: max bending moment [N·mm]
     Lc_mm    : lateral restraint spacing [mm]  (= entraxe appuis)
+    load_pos : point d'application de la charge transversale —
+               'top'    : charge sur la semelle SUPÉRIEURE (pont POSÉ sur rail)
+                          → effet DÉSTABILISANT (zg > 0) → Mcr réduit
+               'bottom' : charge sur la semelle INFÉRIEURE (pont SUSPENDU)
+                          → effet STABILISANT (zg < 0) → Mcr augmenté
     Returns dict with λ_LT, χ_LT, Mcr_kNm, util, ok
     """
     import math
@@ -441,13 +447,22 @@ def _check_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm):
     # Warping constant Iw ≈ (h-tf)²·Iz/4  (symmetric I-section)
     Iw = (h - tf)**2 * Iz / 4.0
 
-    # Critical moment (EN 1993-1-1 annex F, C1=1):
-    # Mcr = (π/L)·√(E·Iz·G·It + (π/L)²·E·Iz·E·Iw)
     if L <= 0:
-        return {"λ_LT": 0.0, "χ_LT": 1.0, "Mcr_kNm": 9999.0, "util": 0.0, "ok": True}
+        return {"λ_LT": 0.0, "χ_LT": 1.0, "Mcr_kNm": 9999.0, "util": 0.0,
+                "ok": True, "load_pos": load_pos}
 
-    pi_L = math.pi / L
-    Mcr  = pi_L * math.sqrt(E * Iz * G * It + (pi_L**2) * E * Iz * E * Iw)   # N·mm
+    # Coefficients EN 1993-1-1 annexe F (charge transversale, appuis fourche) :
+    #   C1 ≈ 1.13, C2 ≈ 0.45 (valeurs usuelles, conservatrices).
+    C1, C2 = 1.13, 0.45
+    # zg = distance du point d'application de charge au centre de cisaillement.
+    #   posé (charge sur semelle sup)   → zg = +h/2  (déstabilisant)
+    #   suspendu (charge sur semelle inf)→ zg = −h/2  (stabilisant)
+    zg = (+h / 2.0) if load_pos == "top" else (-h / 2.0)
+
+    # Mcr = C1·(π²·E·Iz/L²)·[ √( Iw/Iz + L²·G·It/(π²·E·Iz) + (C2·zg)² ) − C2·zg ]
+    pi2EIz_L2 = (math.pi**2) * E * Iz / (L**2)
+    under = (Iw / Iz) + (L**2 * G * It) / ((math.pi**2) * E * Iz) + (C2 * zg)**2
+    Mcr = C1 * pi2EIz_L2 * (math.sqrt(max(under, 0.0)) - C2 * zg)   # N·mm
 
     # Slenderness λ_LT
     lam  = math.sqrt(Wy * Fy / Mcr) if Mcr > 0 else 99.0
@@ -470,7 +485,106 @@ def _check_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm):
         "Mcr_kNm": round(Mcr / 1e6, 1),   # N·mm → kN·m
         "util":    round(util, 3),
         "ok":      util <= 1.0,
+        "load_pos": load_pos,
     }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  RENFORT DÉVERSEMENT — cornières soudées sur la semelle supérieure
+#  (catalogue ANGLE_CATALOGUE et seuil LTB_REINFORCE_THRESHOLD : voir
+#   railway_constants.py)
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _ltb_with_angles(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm, angle, load_pos="top"):
+    """Recalcule le déversement en ajoutant 4 cornières (2 par côté de l'âme,
+    sur toute la longueur, sur la semelle supérieure).
+
+    Théorème de transfert (Huygens) :
+      • Iy (axe fort) : chaque cornière, CdG ≈ au-dessus de la semelle sup,
+        à une distance d_y de l'axe neutre fort (h/2).
+      • Iz (axe faible) : cornières écartées latéralement de l'âme → grand bras
+        de levier d_z, ce qui augmente fortement Iz (donc Mcr).
+
+    angle = tuple (label, A_cm2, I_propre_cm4, e_cm, masse_kg_m).
+    Retourne (ltb_dict, Iy_tot_cm4, Iz_tot_cm4).
+    """
+    _lbl, A_cm2, I0_cm4, e_cm, _m = angle
+    h  = float(size_mm)
+    b  = float(b_mm)              # largeur de semelle
+    A  = A_cm2 * 100.0            # mm²
+    I0 = I0_cm4 * 1e4             # mm⁴
+    e  = e_cm * 10.0              # mm — CdG cornière depuis le talon (heel)
+
+    # Disposition : la cornière coiffe le BORD de la semelle supérieure —
+    # aile horizontale dans la continuité de la semelle (même niveau), aile
+    # verticale rabattue vers le bas le long du chant. Le talon est au bord
+    # de la semelle ; le CdG de la cornière est donc À ≈ e vers l'EXTÉRIEUR
+    # du bord (latéralement) et ≈ e sous le dessus de semelle (verticalement).
+
+    # ── Iy (axe fort) : CdG ≈ au niveau de la semelle supérieure (à h/2) ─────
+    # L'aile horizontale est dans la continuité de la semelle → d_y ≈ h/2 − e.
+    d_y = max(h / 2.0 - e, 0.0)
+    Iy_add = 2.0 * (I0 + A * d_y**2)          # mm⁴ (2 cornières / poutre)
+
+    # ── Iz (axe faible) : cornière DÉBORDANT au-delà du bord de semelle ──────
+    # CdG à b/2 + e du plan de l'âme (talon au bord, masse vers l'extérieur).
+    d_z = b / 2.0 + e
+    Iz_add = 2.0 * (I0 + A * d_z**2)          # mm⁴ (2 cornières / poutre)
+
+    Iy_tot = float(Iy_cm4) * 1e4 + Iy_add     # mm⁴
+    Iz_tot = float(Iz_cm4) * 1e4 + Iz_add     # mm⁴
+
+    ltb = _check_ltb(size_mm, b_mm, tf_mm, Iy_tot / 1e4, Iz_tot / 1e4,
+                     M_max_Nmm, Lc_mm, load_pos)
+    return ltb, Iy_tot / 1e4, Iz_tot / 1e4
+
+
+def _reinforce_against_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm, L_beam_mm, load_pos="top"):
+    """Si le taux de déversement de base dépasse 85 %, essaie successivement
+    les cornières du catalogue (50×50×5 → 70×70×7 → 100×100×10) jusqu'à ramener
+    le taux ≤ 1.0. Renforce Iy ET Iz.
+
+    Retourne un dict :
+      {needed, base_util, angle, util, Iy_tot, Iz_tot, m_angles_kg, ltb}
+      - needed     : bool — un renfort est-il requis (taux base > seuil) ?
+      - angle      : label de la cornière retenue (ou None)
+      - m_angles_kg: masse des 4 cornières sur toute la longueur du CR [kg]
+                     (×2 poutres parallèles → calculé à l'appelant si besoin)
+    """
+    base = _check_ltb(size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm, load_pos)
+    out = {
+        "needed": base["util"] > LTB_REINFORCE_THRESHOLD,
+        "base_util": base["util"],
+        "angle": None, "util": base["util"],
+        "Iy_tot": Iy_cm4, "Iz_tot": Iz_cm4,
+        "m_angles_kg": 0.0, "ltb": base,
+    }
+    if not out["needed"]:
+        return out
+
+    # Essai des cornières par taille croissante
+    best = None
+    for ang in ANGLE_CATALOGUE:
+        ltb_a, Iy_t, Iz_t = _ltb_with_angles(
+            size_mm, b_mm, tf_mm, Iy_cm4, Iz_cm4, M_max_Nmm, Lc_mm, ang, load_pos)
+        if best is None:
+            best = (ang, ltb_a, Iy_t, Iz_t)        # garde au moins la 1ère
+        if ltb_a["util"] <= 1.0:
+            best = (ang, ltb_a, Iy_t, Iz_t)
+            break
+
+    ang, ltb_a, Iy_t, Iz_t = best
+    _lbl, _A, _I0, _e, m_lin = ang
+    # 2 cornières sur toute la longueur d'UNE poutre (une à chaque bord de
+    # semelle). ×2 poutres parallèles → calculé à l'appelant.
+    m_angles_one_beam = m_lin * (float(L_beam_mm) / 1000.0) * 2.0
+    out.update({
+        "angle": _lbl, "util": ltb_a["util"],
+        "Iy_tot": round(Iy_t, 1), "Iz_tot": round(Iz_t, 1),
+        "m_angles_kg": m_angles_one_beam, "ltb": ltb_a,
+    })
+    return out
 
 
 def _select_beam(beam_type, I_req_cm4, M_max_Nmm):
@@ -707,14 +821,25 @@ def compute_columns(
     n_appuis_total=4,   # nb total d'appuis
     sommier_chariot_mm=2000,  # entraxe galets du chariot [mm]
     entraxe_col_mm=6000,      # entraxe entre colonnes [mm]
+    is_suspendu=False,        # bool — pont suspendu
+    h_cross_beam_mm=0.0,      # hauteur section cross beam [mm] (suspendu)
 ):
     """
     Dimensionne la colonne et retourne un dict complet.
     Utilise h_rail_mm pour la flèche (hauteur totale).
-    h_col = h_rail_mm - h_rail_section_mm - h_poutre_CR_mm (hauteur nette colonne).
+
+    Hauteur NETTE de colonne (pour la masse acier) :
+      • Pont POSÉ     : h_col = h_rail − h_rail_section − h_poutre_CR
+                        (la voie repose sur la colonne, sous le niveau rail).
+      • Pont SUSPENDU : h_col = h_rail + h_poutre_CR + h_cross_beam
+                        (la cross beam est en tête de colonne et la voie est
+                        suspendue dessous ; la colonne monte donc plus haut).
     """
     h_total = float(h_rail_mm)        # mm — hauteur pour critère flèche
-    h_col   = max(100.0, h_total - float(h_rail_section_mm) - float(h_poutre_CR_mm))
+    if is_suspendu:
+        h_col = max(100.0, h_total + float(h_poutre_CR_mm) + float(h_cross_beam_mm))
+    else:
+        h_col = max(100.0, h_total - float(h_rail_section_mm) - float(h_poutre_CR_mm))
 
     # Colonnes par appui : 2 si simple, 3 si twin (2 + 1 central)
     # Réaction max sur la colonne critique (distribution par poutre horizontale)
@@ -1030,7 +1155,25 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
 
     cout_boulonnerie = n_appuis * PRICE_BOULONNERIE_UNIT
 
-    a_cost = m1 * float(steel_price) * FACT_DECOUPE
+    # ── Renfort déversement (cornières) ──────────────────────────────────────
+    # Si le taux de déversement de base dépasse 85 %, on ajoute des cornières
+    # sur la semelle supérieure (4 par poutre, sur toute la longueur).
+    _Iz_base = IZ_TABLES.get(beam_type, {}).get(taille, inertie_chosen * 0.04)
+    # Point d'application de la charge pour le déversement :
+    #   posé sur rail → charge en HAUT (semelle sup) = déstabilisant
+    #   suspendu      → charge en BAS (semelle inf)  = stabilisant
+    _load_pos = "bottom" if is_suspendu else "top"
+    reinf = _reinforce_against_ltb(
+        taille, b_mm, tf_mm, inertie_chosen, _Iz_base,
+        M_max_Nmm, float(support_spacing_mm), L, _load_pos,
+    )
+    # Masse cornières : 2 cornières par poutre × 2 poutres. Elle est INTÉGRÉE
+    # à la masse poutre (m1) → la ligne "incl. ..." ne réaffiche pas le chiffre.
+    m_angles = reinf["m_angles_kg"] * 2.0 if reinf["angle"] else 0.0
+    m1 += m_angles                       # cornières comptées dans Beam mass
+    ltb_final = reinf["ltb"]
+
+    a_cost = m1 * float(steel_price) * FACT_DECOUPE   # inclut les cornières
     b_cost = m2 * float(rail_price)
     c_cost = m3 * float(lasercut_price)
     d_cost = peinture * float(paint_price)
@@ -1045,9 +1188,14 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
         "sigma_MPa": sigma_MPa,
         "sigma_adm_MPa": SIGMA_ADM_MPA,
         "gouverne": gov,
-        "ltb": _check_ltb(taille, b_mm, tf_mm, inertie_chosen, 
-                          IZ_TABLES.get(beam_type, {}).get(taille, inertie_chosen * 0.04),
-                          M_max_Nmm, float(support_spacing_mm)),
+        "ltb": ltb_final,
+        # Renfort déversement par cornières
+        "ltb_reinforced": bool(reinf["angle"]),
+        "angle_label": reinf["angle"],
+        "ltb_base_util": reinf["base_util"],
+        "Iy_reinforced": reinf["Iy_tot"],
+        "Iz_reinforced": reinf["Iz_tot"],
+        "m_angles": round(m_angles),
         "fleche_mm": fleche_mm,
         "fleche_admissible_mm": fleche_admissible_mm,
         "lc_desc": lc_desc,
@@ -1070,6 +1218,12 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
         "crane_type": crane_type,
         "is_suspendu": is_suspendu,
         "crane_span_mm": crane_span_mm,
+        # Inputs (pour résumé PDF cohérent — distincts des résultats)
+        "rv_kN": float(rv_kN) if rv_kN else 0.0,
+        "rv2_kN": float(rv2_kN) if (nbre_pont == 2 and rv2_kN) else 0.0,
+        "carriage_mm": float(carriage_mm) if carriage_mm else 0.0,
+        "carriage2_mm": float(carriage2_mm) if (nbre_pont == 2 and carriage2_mm) else 0.0,
+        "space_btw_mm": float(space_mm) if (nbre_pont == 2 and space_mm) else 0.0,
     }
 
 
@@ -1092,7 +1246,8 @@ def _recompute_costs(r, steel_price, rail_price, lasercut_price, paint_price):
     peinture = float(r.get("peinture", 0))
     cout_boulonnerie = float(r.get("cout_boulonnerie", 0))
 
-    # Recalculer les coûts avec les nouveaux prix
+    # Recalculer les coûts avec les nouveaux prix.
+    # NB : m1 inclut déjà la masse des cornières de renfort → pas de coût séparé.
     a_cost = m1 * float(steel_price) * FACT_DECOUPE
     b_cost = m2 * float(rail_price)
     c_cost = m3 * float(lasercut_price)
@@ -1105,6 +1260,11 @@ def _recompute_costs(r, steel_price, rail_price, lasercut_price, paint_price):
     r["c"] = round(c_cost)
     r["d"] = round(d_cost)
     r["cout_mat"] = round(cout_mat)
+    # Mémoriser les prix utilisés (pour le résumé PDF)
+    r["price_steel"]    = float(steel_price)
+    r["price_rail"]     = float(rail_price)
+    r["price_lasercut"] = float(lasercut_price)
+    r["price_paint"]    = float(paint_price)
     return r
 
 
@@ -1286,19 +1446,55 @@ def _make_pdf_bytes(r):
     story.append(hdr_table)
     story.append(Spacer(1, 6*mm))
 
-    # ── Inputs summary (sans cas de charge — il est sur l'image) ─────────────
+    # ── Inputs summary (INPUTS uniquement — le profilé est un résultat) ──────
     tag_items = [
-        ("Beam", r.get("beam_label","")),
+        ("Crane type", r.get("crane_type", "Posé")),
+        ("Beam family", r.get("beam_type", "")),
     ]
     if not r.get("is_suspendu"):
-        tag_items.append(("Rail", r.get("rail_short") or r.get("rail_label","")))
+        tag_items.append(("Rail", r.get("rail_short") or r.get("rail_label", "")))
     tag_items += [
-        ("Crane type", r.get("crane_type","Posé")),
         ("Length", f"{r.get('total_length_mm',0):.0f} mm"),
         ("Spacing", f"{r.get('support_spacing_mm',0):.0f} mm"),
-        ("Support type", r.get("appui_type","")),
+        ("Supports/beam", f"{r.get('nbre_appuis',2)}"),
+        ("Support type", r.get("appui_type", "")),
     ]
-    tag_text = "  |  ".join(f"<b>{k}:</b> {v}" for k,v in tag_items)
+    if r.get("appui_type") == "Olsen":
+        tag_items.append(("Column", r.get("col_type", "")))
+        tag_items.append(("Config", r.get("col_config", "")))
+        if r.get("rail_height_mm"):
+            tag_items.append(("Rail height", f"{r.get('rail_height_mm',0):.0f} mm"))
+        if r.get("is_suspendu") and r.get("crane_span_mm"):
+            tag_items.append(("Crane span", f"{r.get('crane_span_mm',0):.0f} mm"))
+    # Données pont(s)
+    _nq = int(r.get("crane_qty", r.get("nbre_pont", 1)) or 1)
+    tag_items.append(("Cranes", f"{_nq}"))
+    if r.get("rv_kN"):
+        tag_items.append(("Rv wheel", f"{r.get('rv_kN',0):.0f} kN"))
+    if r.get("carriage_mm"):
+        tag_items.append(("Carriage", f"{r.get('carriage_mm',0):.0f} mm"))
+    if r.get("appui_type") == "Olsen":
+        _h1 = [r.get("HT3_kN", 0), r.get("HS_kN", 0), r.get("HL_kN", 0)]
+        if any(_h1):
+            tag_items.append(("HT3/HS/HL", "/".join(f"{float(x):.0f}" for x in _h1) + " kN"))
+    if _nq == 2:
+        if r.get("rv2_kN"):
+            tag_items.append(("Rv wheel 2", f"{r.get('rv2_kN',0):.0f} kN"))
+        if r.get("carriage2_mm"):
+            tag_items.append(("Carriage 2", f"{r.get('carriage2_mm',0):.0f} mm"))
+        if r.get("space_btw_mm"):
+            tag_items.append(("Space between", f"{r.get('space_btw_mm',0):.0f} mm"))
+        if r.get("appui_type") == "Olsen":
+            _h2 = [r.get("HT3_2_kN", 0), r.get("HS_2_kN", 0), r.get("HL_2_kN", 0)]
+            if any(_h2):
+                tag_items.append(("HT3/HS/HL 2", "/".join(f"{float(x):.0f}" for x in _h2) + " kN"))
+    # Prix (toujours affichés pour tracer la config de calcul complète)
+    tag_items.append(("Steel price", f"{r.get('price_steel', 0):.2f} €/kg"))
+    if not r.get("is_suspendu"):
+        tag_items.append(("Rail price", f"{r.get('price_rail', 0):.2f} €/kg"))
+    tag_items.append(("Lasercut price", f"{r.get('price_lasercut', 0):.2f} €/kg"))
+    tag_items.append(("Paint price", f"{r.get('price_paint', 0):.2f} €/L"))
+    tag_text = "  |  ".join(f"<b>{k}:</b> {v}" for k, v in tag_items)
     tag_p = ParagraphStyle("tag", parent=normal, backColor=LIGHT,
                            borderPadding=6, leading=14)
     story.append(Paragraph(tag_text, tag_p))
@@ -1334,8 +1530,11 @@ def _make_pdf_bytes(r):
 
     rows = [
         ["Poste", "Quantité", "Cost"],
+        ["Type beam",   r.get("beam_label",""),          ""],
         ["Beam mass",  f"{r['m1']} kg",  f"{r['a']} €"],
     ]
+    if r.get("ltb_reinforced"):
+        rows.append([f"   incl. angle iron {r.get('angle_label','')}", "", ""])
     if not r.get("is_suspendu"):
         rows.append(["Rail mass",    f"{r['m2']} kg",  f"{r['b']} €"])
     rows += [
@@ -1403,7 +1602,7 @@ def _make_pdf_bytes(r):
             ["Poste", "Quantité", "Cost"],
             ["Type colonne",       col.get("col_label","—"),             ""],
             ["Column mass",     f"{col.get('m_col',0)} kg",           f"{col.get('a_col',0)} €"],
-            *([(f"  incl. angle iron 70×70×6", f"{col.get('m_corniere',0)} kg", "")] if col.get("m_corniere",0) > 0 else []),
+            *([("   incl. bracing 70×70×6", "", "")] if col.get("m_corniere",0) > 0 else []),
             ["Lasercut col.",f"{col.get('m_div_col',0)} kg",       f"{col.get('c_col',0)} €"],
             ["Paint col.",    f"{col.get('peinture_col',0)} L",     f"{col.get('d_col',0)} €"],
             ["Bolts col.", f"{col.get('n_cols_total',0)} col.",  f"{col.get('boul_col',0)} €"],
@@ -1528,6 +1727,697 @@ def _make_pdf_bytes(r):
     doc.build(story, onFirstPage=_footer_canvas, onLaterPages=_footer_canvas)
     buf.seek(0)
     return buf.read()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  TECHNICAL EXTRACT — fiche client + visuel 3D interactif (Three.js)
+#
+#  Génère un fichier HTML autonome (aucune dépendance externe sauf le CDN
+#  Three.js) contenant :
+#    • un en-tête Floow/Olsen
+#    • un visuel 3D complet et navigable de la structure : 2 poutres de roulement
+#      parallèles, rails, appuis (colonnes encastrées ou appuis client), cross
+#      beams (poutres de suspension) et le pont roulant schématisé.
+#    • un tableau de synthèse technique destiné au client (sections, portées,
+#      flèches, contraintes, hauteurs).
+#
+#  Le HTML est totalement self-contained : il s'ouvre dans n'importe quel
+#  navigateur et peut être envoyé tel quel au client.
+# ─────────────────────────────────────────────────────────────────────────────
+from datetime import date
+
+
+def _make_tech_extract_html(r):
+    """Construit le contenu HTML (str) de l'extrait technique client + 3D.
+
+    Visuel 3D détaillé et proportionnel :
+      • Profilés en I réels (âme + 2 ailes) pour poutres, colonnes, cross beams.
+      • Pont POSÉ : 2 voies de roulement sur colonnes, rails dessus, pont qui
+        roule sur les rails via sommiers (end carriages).
+      • Pont SUSPENDU : cross beams de tête de colonne à tête de colonne ;
+        voies de roulement suspendues SOUS les cross beams, à ~500 mm des
+        colonnes ; pont suspendu sous les voies avec sommiers.
+      • Contreventement en X au milieu si config « Bracing », ou double colonne
+        (twin) au milieu si config « Twin column ».
+      • Encastrements (platines + goussets) au pied des colonnes.
+    """
+
+    col   = r.get("col_result") or {}
+    xb    = r.get("extra_beam") or {}
+    xb_ok = bool(xb and not xb.get("error"))
+
+    is_susp    = bool(r.get("is_suspendu"))
+    col_config = r.get("col_config") or ""          # "Bracing" | "Twin column" | ""
+    has_brace  = (col_config == "Bracing") and bool(col)
+    has_twin   = (col_config == "Twin column") and bool(col)
+
+    # ── Géométrie principale (mm) ────────────────────────────────────────────
+    L_tot   = float(r.get("total_length_mm", 6000) or 6000)
+    spacing = float(r.get("support_spacing_mm", 6000) or 6000)
+    crane_span = float(r.get("crane_span_mm", 0) or 0)
+
+    if crane_span > 0:
+        rail_gap = crane_span
+    elif xb_ok and xb.get("crane_span_mm"):
+        rail_gap = float(xb.get("crane_span_mm"))
+    else:
+        rail_gap = max(2000.0, L_tot * 0.35)
+
+    # Hauteur de RAIL (sol → dessus du rail) — h_total_mm côté colonne.
+    h_rail = float(col.get("h_total_mm", 0) or col.get("h_col_mm", 0) or 0)
+    if h_rail <= 0:
+        h_rail = max(2500.0, rail_gap * 0.6)
+
+    # Sections (hauteur du profilé) pour donner du volume — proportions réelles.
+    def _sec_h(label, fallback):
+        digits = "".join(ch for ch in str(label) if ch.isdigit())
+        return float(digits) if digits else float(fallback)
+
+    beam_h = _sec_h(r.get("beam_label", "HEA200"), 200)
+    col_h  = _sec_h(col.get("col_label", "HEB200"), 200) if col else 200.0
+    xb_h   = _sec_h(xb.get("beam_label", "HEA160"), 160) if xb_ok else 160.0
+
+    rail_short = r.get("rail_short") or r.get("rail_label") or ""
+
+    # Positions des appuis le long de la poutre (mm depuis 0).
+    n_sup = max(2, int(r.get("n_appuis", 4)) // 2)
+    if n_sup == 1:
+        support_x = [L_tot / 2.0]
+    else:
+        step = L_tot / (n_sup - 1)
+        support_x = [round(i * step) for i in range(n_sup)]
+
+    # Débord des voies de roulement (suspendu) : ~500 mm en dehors de l'appui.
+    susp_overhang = 500.0
+    L_xb = float(xb.get("L_beam_mm", rail_gap + 2 * susp_overhang)) if xb_ok else rail_gap + 2 * susp_overhang
+
+    # Ponts : nombre, empattement des sommiers (= carriage length), espacement.
+    nbre_pont = int(r.get("nbre_pont", 1) or 1)
+    carriage1 = float(r.get("carriage_mm", 0) or 0)
+    carriage2 = float(r.get("carriage2_mm", 0) or 0)
+    space_btw = float(r.get("space_btw_mm", 0) or 0)
+    if carriage1 <= 0:
+        carriage1 = max(1500.0, rail_gap * 0.25)   # fallback raisonnable
+    if nbre_pont == 2 and carriage2 <= 0:
+        carriage2 = carriage1
+    if nbre_pont == 2 and space_btw <= 0:
+        space_btw = max(carriage1 * 1.5, rail_gap * 0.3)
+
+    # Réactions au galet (kN) — pilotent la hauteur de la poutre du pont.
+    rv1 = float(r.get("rv_kN", 0) or 0)
+    rv2 = float(r.get("rv2_kN", 0) or 0) if nbre_pont == 2 else 0.0
+
+    geo = {
+        "L_tot": L_tot, "rail_gap": rail_gap, "h_rail": h_rail,
+        "beam_h": beam_h, "col_h": col_h, "xb_h": xb_h,
+        "support_x": support_x, "crane_span": crane_span if crane_span > 0 else rail_gap,
+        "is_suspendu": is_susp, "has_columns": bool(col),
+        # Cross beams UNIQUEMENT pour un pont suspendu (les voies y sont
+        # suspendues dessous). En pont posé, les voies reposent directement
+        # sur les colonnes → aucune cross beam transversale.
+        "has_crossbeam": is_susp, "has_brace": has_brace, "has_twin": has_twin,
+        "susp_overhang": susp_overhang, "L_xb": L_xb,
+        "nbre_pont": nbre_pont, "carriage1": carriage1, "carriage2": carriage2,
+        "space_btw": space_btw, "rv1": rv1, "rv2": rv2,
+        "ltb_reinforced": bool(r.get("ltb_reinforced")),
+        "angle_label": r.get("angle_label") or "",
+        "beam_label": r.get("beam_label", ""), "col_label": col.get("col_label", "") if col else "",
+        "xb_label": xb.get("beam_label", "") if xb_ok else "",
+        "rail_short": rail_short, "appui_type": r.get("appui_type", ""),
+    }
+    geo_json = json.dumps(geo)
+
+    # ── Tableau de synthèse ──────────────────────────────────────────────────
+    def _row(label, value):
+        return f"<tr><td class='lbl'>{label}</td><td class='val'>{value}</td></tr>"
+
+    spec_rows = [_row("Profilé poutre de roulement", r.get("beam_label", "—"))]
+    if not is_susp:
+        spec_rows.append(_row("Rail", rail_short or "—"))
+    if r.get("ltb_reinforced"):
+        spec_rows.append(_row("Renfort déversement",
+                              f"Cornières {r.get('angle_label','')}"))
+    spec_rows += [
+        _row("Type de pont", r.get("crane_type", "—")),
+        _row("Longueur totale", f"{L_tot:.0f} mm"),
+        _row("Entraxe appuis", f"{spacing:.0f} mm"),
+    ]
+    if crane_span > 0:
+        spec_rows.append(_row("Portée du pont (entre rails)", f"{crane_span:.0f} mm"))
+
+    _f, _fad = float(r.get("fleche_mm", 0) or 0), float(r.get("fleche_admissible_mm", 0) or 0)
+    _sig, _sad = float(r.get("sigma_MPa", 0) or 0), float(r.get("sigma_adm_MPa", 0) or 0)
+    _fok = "✔" if _fad and _f <= _fad else "⚠"
+    _sok = "✔" if _sad and _sig <= _sad else "⚠"
+    spec_rows.append(_row("Flèche poutre", f"{_f:.2f} mm / {_fad:.2f} mm  {_fok}"))
+    spec_rows.append(_row("Contrainte poutre", f"{_sig:.1f} MPa / {_sad:.1f} MPa  {_sok}"))
+
+    col_rows = []
+    if col:
+        col_rows.append(_row("Profilé colonne", col.get("col_label", "—")))
+        if col_config:
+            col_rows.append(_row("Configuration", col_config))
+        col_rows.append(_row("Hauteur rail", f"{col.get('h_total_mm', 0):.0f} mm"))
+        _cf, _cfa = float(col.get("delta_mm", 0) or 0), float(col.get("f_adm_mm", 0) or 0)
+        _cfok = "✔" if _cfa and _cf <= _cfa else "⚠"
+        col_rows.append(_row("Flèche colonne", f"{_cf:.2f} mm / {_cfa:.2f} mm  {_cfok}"))
+        col_rows.append(_row("Taux d'utilisation", f"{float(col.get('util_tot', 0) or 0):.0%}"))
+
+    xb_rows = []
+    if xb_ok:
+        xb_rows.append(_row("Profilé cross beam", xb.get("beam_label", "—")))
+        xb_rows.append(_row("Longueur cross beam", f"{xb.get('L_beam_mm', 0):.0f} mm"))
+        _xf, _xfa = float(xb.get("delta_mm", 0) or 0), float(xb.get("f_adm_mm", 0) or 0)
+        _xfok = "✔" if _xfa and _xf <= _xfa else "⚠"
+        xb_rows.append(_row("Flèche cross beam", f"{_xf:.2f} mm / {_xfa:.2f} mm  {_xfok}"))
+
+    spec_html, col_html, xb_html = "".join(spec_rows), "".join(col_rows), "".join(xb_rows)
+    client  = r.get("client") or "—"
+    project = r.get("project") or "—"
+    today   = r.get("date") or date.today().strftime("%d/%m/%Y")
+
+    col_section = f"<h3>Colonnes Olsen</h3><table class='spec'>{col_html}</table>" if col_rows else ""
+    xb_section  = f"<h3>Cross beam</h3><table class='spec'>{xb_html}</table>" if xb_rows else ""
+
+    html = """<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Extrait technique — __PROJECT__</title>
+<style>
+  :root{--dark:#0A1E32;--amber:#FDAE1B;--light:#f4f6f9;}
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:'Segoe UI',Arial,sans-serif;color:#1a2733;background:#fff;}
+  header{background:var(--dark);color:#fff;padding:18px 28px;border-bottom:4px solid var(--amber);
+         display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;}
+  header h1{margin:0;font-size:1.25rem;letter-spacing:.5px;}
+  header .meta{font-size:.8rem;color:var(--amber);text-align:right;line-height:1.5;}
+  .wrap{max-width:1100px;margin:0 auto;padding:24px 28px 60px;}
+  .notice{margin:14px 0 0;padding:12px 16px;border-left:4px solid var(--amber);
+           background:#fff7e6;color:#5a4a25;font-size:.84rem;border-radius:4px;}
+  #view3d{width:100%;height:560px;background:radial-gradient(circle at 50% 35%,#f3f7fb,#cdd9e6);
+          border:1px solid #cdd8e3;border-radius:8px;position:relative;overflow:hidden;margin-top:14px;}
+  #view3d .hint{position:absolute;bottom:10px;left:12px;font-size:.72rem;color:#5a7088;
+                background:rgba(255,255,255,.78);padding:4px 9px;border-radius:5px;}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:14px 0 4px;font-size:.78rem;color:#42566a;}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .legend i{width:14px;height:14px;border-radius:3px;display:inline-block;}
+  h2{color:var(--dark);border-bottom:2px solid var(--amber);padding-bottom:5px;margin-top:34px;font-size:1.1rem;}
+  h3{color:var(--dark);margin:22px 0 8px;font-size:.98rem;}
+  table.spec{width:100%;border-collapse:collapse;font-size:.86rem;margin-bottom:8px;}
+  table.spec td{padding:7px 10px;border:1px solid #e1e8ef;}
+  table.spec td.lbl{background:var(--light);color:#33485c;width:55%;}
+  table.spec td.val{font-weight:600;color:var(--dark);}
+  footer{background:var(--dark);color:#cfd9e3;font-size:.72rem;text-align:center;padding:12px;
+         border-top:3px solid var(--amber);}
+  .btns{margin:18px 0;}
+  .btns button{background:var(--dark);color:#fff;border:none;padding:8px 14px;border-radius:6px;
+               cursor:pointer;font-size:.8rem;margin-right:8px;}
+  .btns button:hover{background:#143150;}
+  @media print{.btns,#view3d .hint{display:none;}}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>OLSEN — Crane Runway · Extrait technique</h1>
+  <div class="meta">Client : __CLIENT__<br/>Projet : __PROJECT__<br/>Date : __DATE__</div>
+</header>
+
+<div class="wrap">
+  <div class="notice">
+    <b>Prédimensionnement indicatif.</b> Les sections, hauteurs et quantités présentées
+    constituent une estimation préliminaire destinée au chiffrage. Elles sont susceptibles
+    d'évoluer après commande et restent soumises à l'étude d'exécution, aux notes de calcul
+    définitives et à la validation finale par le bureau d'études. Document non contractuel.
+  </div>
+
+  <h2>Visualisation 3D de la structure</h2>
+  <div id="view3d"><div class="hint">🖱️ Glisser pour pivoter · molette pour zoomer · clic droit pour déplacer</div></div>
+  <div class="legend">
+    <span><i style="background:#3a5e82"></i>Voies de roulement</span>
+    <span><i style="background:#c0392b"></i>Rails</span>
+    <span><i style="background:#8a97a6"></i>Colonnes</span>
+    <span><i style="background:#5b6b7a"></i>Cross beam</span>
+    <span><i style="background:#E1A100"></i>Pont roulant</span>
+    <span><i style="background:#27ae60"></i>Contreventement</span>
+    <span><i style="background:#6b7783"></i>Cornières renfort</span>
+  </div>
+  <div class="btns">
+    <button onclick="window.print()">🖨️ Imprimer / PDF</button>
+    <button onclick="resetView()">↺ Réinitialiser la vue</button>
+  </div>
+
+  <h2>Synthèse technique</h2>
+  <table class="spec">__SPEC_ROWS__</table>
+  __COL_SECTION__
+  __XB_SECTION__
+</div>
+
+<footer>© Floow | All rights reserved — Prédimensionnement, document non contractuel soumis à révision</footer>
+
+<script>
+const GEO = __GEO_JSON__;
+let scene, camera, renderer, root;
+let isDown=false, btn=0, lx=0, ly=0;
+let rotX=0.52, rotY=0.72, dist, target={x:0,y:0,z:0};
+
+function init(){
+  const host=document.getElementById('view3d');
+  const W=host.clientWidth,H=host.clientHeight;
+  scene=new THREE.Scene(); scene.background=null;
+  camera=new THREE.PerspectiveCamera(42,W/H,1,400000);
+  renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+  renderer.setSize(W,H); renderer.setPixelRatio(window.devicePixelRatio);
+  host.appendChild(renderer.domElement);
+  scene.add(new THREE.AmbientLight(0xffffff,0.62));
+  const d1=new THREE.DirectionalLight(0xffffff,0.55); d1.position.set(0.6,1.4,0.9); scene.add(d1);
+  const d2=new THREE.DirectionalLight(0xffffff,0.35); d2.position.set(-0.8,0.7,-0.6); scene.add(d2);
+  const d3=new THREE.DirectionalLight(0xffffff,0.18); d3.position.set(0,-1,0.3); scene.add(d3);
+  root=new THREE.Group(); scene.add(root);
+  build();
+  // Centrer la structure verticalement
+  root.position.y = -GEO.h_rail*0.42;
+  dist=Math.max(GEO.L_tot,GEO.rail_gap,GEO.h_rail)*2.0;
+  animate(); bindControls(host);
+}
+
+function mat(c,opts){return new THREE.MeshLambertMaterial(Object.assign({color:c},opts||{}));}
+
+// Profilé en I. axis :
+//   'x' → longueur le long de X, âme verticale (poutres de roulement, cross beams le long de X)
+//   'z' → longueur le long de Z, âme verticale (cross beams transversales)
+//   'y' → COLONNE verticale, longueur le long de Y. webDir = orientation de l'âme :
+//         'z' → âme le long de X, ailes le long de Z (axe fort perpendiculaire à la CR)
+//         'x' → âme le long de Z, ailes le long de X (axe fort le long de la CR)
+function ibeam(L,h,axis,cx,cy,cz,color,webDir){
+  const g=new THREE.Group();
+  const b=h*0.62;                 // largeur ailes
+  const tf=Math.max(h*0.08,5);    // épaisseur aile
+  const tw=Math.max(h*0.05,3);    // épaisseur âme
+  const m=mat(color);
+  if(axis==='y'){
+    // Colonne verticale en I, hauteur L selon Y.
+    //   wd==='x' : ailes larges selon X, âme (plat) le long de Z
+    //              → axe fort // X, axe faible // Z
+    //   wd==='z' : ailes larges selon Z, âme (plat) le long de X
+    //              → axe fort // Z, axe faible // X
+    const wd = webDir||'x';
+    let web, fl1, fl2;
+    if(wd==='x'){
+      // âme : mince en X, pleine hauteur Y, profonde en Z
+      web=new THREE.Mesh(new THREE.BoxGeometry(tw, L, b), m);
+      // ailes : larges en X, pleine hauteur Y, minces en Z, décalées en Z
+      fl1=new THREE.Mesh(new THREE.BoxGeometry(b, L, tf), m);
+      fl2=new THREE.Mesh(new THREE.BoxGeometry(b, L, tf), m);
+      fl1.position.z=(b-tf)/2; fl2.position.z=-(b-tf)/2;
+    }else{
+      // âme : mince en Z, pleine hauteur Y, profonde en X
+      web=new THREE.Mesh(new THREE.BoxGeometry(b, L, tw), m);
+      // ailes : larges en Z, pleine hauteur Y, minces en X, décalées en X
+      fl1=new THREE.Mesh(new THREE.BoxGeometry(tf, L, b), m);
+      fl2=new THREE.Mesh(new THREE.BoxGeometry(tf, L, b), m);
+      fl1.position.x=(b-tf)/2; fl2.position.x=-(b-tf)/2;
+    }
+    g.add(web,fl1,fl2);
+    g.position.set(cx,cy,cz);
+    return g;
+  }
+  // Poutres horizontales : âme verticale, ailes horizontales.
+  const web=new THREE.Mesh(new THREE.BoxGeometry(L,h-2*tf,tw),m);
+  const fl1=new THREE.Mesh(new THREE.BoxGeometry(L,tf,b),m);
+  const fl2=new THREE.Mesh(new THREE.BoxGeometry(L,tf,b),m);
+  fl1.position.y=(h-tf)/2; fl2.position.y=-(h-tf)/2;
+  g.add(web,fl1,fl2);
+  if(axis==='z') g.rotation.y=Math.PI/2;
+  g.position.set(cx,cy,cz);
+  return g;
+}
+
+function box(w,h,d,color){return new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat(color));}
+
+// Diagonale (contreventement) entre 2 points, section carrée s.
+function strut(x1,y1,z1,x2,y2,z2,s,color){
+  const dx=x2-x1,dy=y2-y1,dz=z2-z1;
+  const len=Math.sqrt(dx*dx+dy*dy+dz*dz);
+  const m=new THREE.Mesh(new THREE.BoxGeometry(s,len,s),mat(color));
+  m.position.set((x1+x2)/2,(y1+y2)/2,(z1+z2)/2);
+  const dir=new THREE.Vector3(dx,dy,dz).normalize();
+  const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),dir);
+  m.quaternion.copy(q);
+  return m;
+}
+
+// Embase boulonnée : platine + 4 goussets + 4 boulons.
+function footing(x,z,w){
+  const g=new THREE.Group();
+  const plate=box(w*1.7,26,w*1.7,0x42505c); plate.position.y=13; g.add(plate);
+  const gus=0x515f6b;
+  [[1,0],[-1,0],[0,1],[0,-1]].forEach(([sx,sz])=>{
+    const gg=box(sx?w*0.45:8, w*0.85, sz?w*0.45:8, gus);
+    gg.position.set(sx*w*0.5, w*0.42+26, sz*w*0.5);
+    g.add(gg);
+  });
+  // boulons d'ancrage
+  [[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([sx,sz])=>{
+    const bolt=box(w*0.12,40,w*0.12,0x2b343d);
+    bolt.position.set(sx*w*0.72,20,sz*w*0.72); g.add(bolt);
+  });
+  g.position.set(x,0,z);
+  return g;
+}
+
+// ─── PONT ROULANT ABUS, jaune RAL 1007, poutre CAISSON (box girder) ─────────
+// span     = portée entre les 2 voies (le long de Z).
+// carriage = empattement des galets (le long de X).
+// xc       = position du pont le long de la voie (X).
+// rv       = réaction au galet [kN] → pilote la HAUTEUR de la poutre caisson.
+// yRailTop = niveau du DESSUS DU RAIL (posé) ou DESSOUS de la voie (suspendu).
+//            Les galets viennent en contact sur ce niveau.
+function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
+  const ABUS=0xE1A100, ABUS_D=0xC98E00;  // RAL 1007 + ton plus foncé (ombres)
+  const DARK=0x33373b, STEEL=0x7a8794, BLACK=0x222426;
+  const g=new THREE.Group();
+
+  // Hauteur de la poutre du pont, proportionnelle à la réaction au galet.
+  // Réf : ~250 mm de hauteur de caisson pour 30 kN, bornée pour rester lisible.
+  const rvEff = (rv && rv>0) ? rv : 30;
+  let gh = 250 + (rvEff-30)*6;            // mm
+  gh = Math.max(bh*0.7, Math.min(gh, bh*2.4));
+  const gw = gh*0.55;                      // largeur du caisson (sens X)
+
+  const wheelR = bh*0.26;
+  const somH   = bh*0.5;                   // hauteur caisson sommier (réduite)
+  const somL   = Math.max(carriage*1.1, bh*3.2);
+  const somW   = bh*0.6;
+  const wheelBase = Math.max(carriage, somL*0.7);
+
+  // ── Empilement vertical à partir du contact galet/rail ───────────────────
+  // Posé    : galet SUR le rail → centre galet = yRailTop + wheelR.
+  //           sommier au-dessus des galets, poutre au-dessus du sommier.
+  // Suspendu: galet sous la voie → centre galet = yRailTop - wheelR ; sommier
+  //           dessous, poutre encore dessous.
+  const yWheel = hung ? (yRailTop - wheelR) : (yRailTop + wheelR);
+  const ySom   = hung ? (yWheel - somH*0.5) : (yWheel + somH*0.5);
+  const yGird  = hung ? (ySom - somH*0.5 - gh*0.5) : (ySom + somH*0.5 + gh*0.5);
+
+  // ── Sommiers + galets (un par voie) ──────────────────────────────────────
+  [-1,1].forEach(s=>{
+    const z=s*span/2;
+    const som=box(somL, somH, somW, ABUS);
+    som.position.set(0, ySom, z); g.add(som);
+    // chape de roulement
+    const sole=box(somL, somH*0.16, somW*1.12, ABUS_D);
+    sole.position.set(0, ySom - somH*0.5, z); g.add(sole);
+    // galets en contact sur le rail
+    [-1,1].forEach(d=>{
+      const wheel=new THREE.Mesh(new THREE.CylinderGeometry(wheelR,wheelR,somW*0.8,20),mat(BLACK));
+      wheel.rotation.x=Math.PI/2;
+      wheel.position.set(d*wheelBase*0.5, yWheel, z); g.add(wheel);
+    });
+    // tampons de butée
+    [-1,1].forEach(d=>{
+      const buf=box(bh*0.3,bh*0.45,bh*0.45,DARK);
+      buf.position.set(d*somL*0.5, ySom, z); g.add(buf);
+    });
+  });
+
+  // ── Poutre CAISSON (box girder) enjambant les 2 voies (le long de Z) ─────
+  // Caisson = 2 âmes verticales + semelle sup + semelle inf, avec raidisseurs.
+  const tWeb=Math.max(gh*0.10,6), tFl=Math.max(gh*0.12,8);
+  // semelles haute et basse
+  [+1,-1].forEach(sgn=>{
+    const fl=box(gw, tFl, span, ABUS);
+    fl.position.set(0, yGird + sgn*(gh*0.5 - tFl*0.5), 0); g.add(fl);
+  });
+  // 2 âmes latérales
+  [+1,-1].forEach(sgn=>{
+    const web=box(tWeb, gh-2*tFl, span, sgn>0?ABUS:ABUS_D);
+    web.position.set(sgn*(gw*0.5 - tWeb*0.5), yGird, 0); g.add(web);
+  });
+  // raidisseurs transversaux (le long de la poutre)
+  for(let i=-3;i<=3;i++){
+    const st=box(gw*1.02, gh*0.86, tWeb, ABUS_D);
+    st.position.set(0, yGird, i*span*0.14); g.add(st);
+  }
+
+  // ── Chariot (trolley) + treuil sur le dessus de la poutre ────────────────
+  const yTrolley = yGird + (hung ? -gh*0.5 - bh*0.3 : gh*0.5 + bh*0.3);
+  const trolley=box(gw*1.6, bh*0.6, bh*1.4, DARK);
+  trolley.position.set(0, yTrolley, span*0.12); g.add(trolley);
+  const drum=new THREE.Mesh(new THREE.CylinderGeometry(bh*0.3,bh*0.3,bh*1.0,18),mat(0x3c3f43));
+  drum.rotation.x=Math.PI/2; drum.position.set(0, yTrolley, span*0.12); g.add(drum);
+
+  // ── Palan : câbles + moufle + crochet (pend toujours VERS LE BAS) ────────
+  // Démarre sous le caisson et descend franchement, pour que le crochet soit
+  // nettement SOUS la poutre du pont.
+  const dropTop = (yGird - gh*0.5) - bh*0.05;     // bas du caisson
+  const dropLen = Math.max(bh*3.5, gh*2.2), zc = span*0.12;
+  [-1,1].forEach(d=>{
+    const cable=box(bh*0.05, dropLen, bh*0.05, BLACK);
+    cable.position.set(d*bh*0.18, dropTop - dropLen/2, zc); g.add(cable);
+  });
+  const blockY=dropTop - dropLen;
+  const block=box(bh*0.6, bh*0.55, bh*0.45, DARK);   // moufle foncée (≠ jaune poutre)
+  block.position.set(0, blockY, zc); g.add(block);
+  const hook=new THREE.Mesh(new THREE.TorusGeometry(bh*0.17,bh*0.055,8,16,Math.PI*1.5),mat(STEEL));
+  hook.position.set(0, blockY - bh*0.38, zc); hook.rotation.z=Math.PI*0.1; g.add(hook);
+
+  g.position.x = xc||0;
+  return g;
+}
+
+function build(){
+  const L=GEO.L_tot, gap=GEO.rail_gap, hR=GEO.h_rail;
+  const bh=GEO.beam_h, ch=GEO.col_h, xh=GEO.xb_h;
+  const x0=-L/2, zL=-gap/2, zR=gap/2;
+  const C_BEAM=0x3a5e82, C_RAIL=0xc0392b, C_COL=0x8a97a6, C_XB=0x5b6b7a,
+        C_BRACE=0x27ae60;
+
+  // Niveau supérieur de la structure.
+  //  • Pont POSÉ : les voies de roulement sont encastrées en tête de colonne
+  //    (aucune cross beam transversale, comme une voie de roulement classique).
+  //  • Pont SUSPENDU : les cross beams sont en tête de colonne, et les voies
+  //    sont suspendues juste dessous.
+  const railH=Math.max(bh*0.22,18), railW=Math.max(bh*0.16,12);
+  const yColTop = hR - (GEO.is_suspendu ? 0 : railH);
+  // Axe des voies de roulement
+  const yAxis = GEO.has_crossbeam
+      ? (yColTop - xh - bh/2 - GEO.beam_h*0.6)  // suspendu : CR suspendu sous la cross beam
+      : (yColTop - bh/2);               // posé : CR posée sur la tête de colonne
+  const yXBaxis = yColTop - xh/2;       // axe cross beam (suspendu uniquement)
+  // Hauteur des colonnes :
+  //  • Posé     : la colonne s'arrête SOUS le CR (le CR repose dessus).
+  //  • Suspendu : la colonne monte jusqu'en tête (la cross beam y est posée).
+  const hCol = GEO.is_suspendu ? yColTop : (yAxis - bh/2);
+
+  // Position des voies de roulement (CR) selon Z :
+  //  • Posé      : CR encastrées en tête de colonne → au droit des colonnes.
+  //  • Suspendu  : CR suspendues sous les cross beams, décalées de 500 mm vers
+  //                l'INTÉRIEUR des portiques.
+  const runIn = GEO.is_suspendu ? GEO.susp_overhang : 0;   // 500 mm en suspendu
+  const zRunL = zL + runIn, zRunR = zR - runIn;
+  const runGap = zRunR - zRunL;                            // entraxe réel des CR
+
+  GEO.support_x.forEach(sx=>{
+    const x=x0+sx;
+    [zL,zR].forEach(z=>{
+      if(GEO.has_columns){
+        // Colonnes pivotées de 90° sur leur axe : âme le long de X, ailes le
+        // long de Z (axe fort dans le sens de la CR).
+        root.add(ibeam(hCol, ch, 'y', x, hCol/2, z, C_COL, 'x'));
+        root.add(footing(x,z,ch));
+      } else {
+        const c=box(bh*0.9,hR*0.16,bh*0.9,C_COL); c.position.set(x,hR*0.08,z); root.add(c);
+      }
+    });
+    // Cross beam transversale UNIQUEMENT en pont suspendu (de colonne à
+    // colonne). Raccourcie de ch/2 de chaque côté (s'arrête au nu intérieur
+    // des colonnes) pour un rendu plus propre.
+    if(GEO.has_crossbeam){
+      root.add(ibeam(Math.max(gap - ch, gap*0.5), xh, 'z', x, yXBaxis, 0, C_XB));
+      // Suspentes : du BAS de la cross beam jusqu'au DESSUS du CR (jonction
+      // franche, sans écart visible).
+      [zRunL,zRunR].forEach(z=>{
+        const yXBbot = yXBaxis - xh/2;     // bas de la cross beam
+        const yCRtop = yAxis + bh/2;       // dessus du CR
+        const hHang  = Math.max(yXBbot - yCRtop, 1);
+        const hang=box(ch*0.22, hHang, ch*0.22, C_XB);
+        hang.position.set(x, (yXBbot + yCRtop)/2, z); root.add(hang);
+      });
+    }
+  });
+
+  // ─── Voies de roulement (le long de X), aux positions zRun ────────────────
+  [zRunL,zRunR].forEach(z=>{
+    root.add(ibeam(L, bh, 'x', 0, yAxis, z, C_BEAM));
+
+    // UPN d'about en bout de CR (rendu 3D uniquement) : un profilé en U plaqué
+    // contre chaque extrémité de la voie. Dépasse vers le HAUT en posé,
+    // vers le BAS en suspendu. Largeur adaptée à la hauteur du CR.
+    {
+      const upnH = bh;                 // hauteur du U (largeur d'âme) = hauteur CR
+      const upnW = bh*0.42;            // profondeur des ailes du U (le long de X)
+      const upnT = Math.max(bh*0.07,6);// épaisseur tôle
+      const over = bh*0.95;            // dépassement au-delà de la semelle
+      // Centre vertical du U : décalé vers le haut (posé) ou le bas (suspendu)
+      const yU = GEO.is_suspendu ? (yAxis - over*0.5) : (yAxis + over*0.5);
+      const hU = bh + over;            // hauteur totale couvrant la CR + dépassement
+      [-1,1].forEach(sx=>{             // sx=-1 → bout -X ; sx=+1 → bout +X
+        const xEnd = sx*L/2;
+        // âme du U (face PLEINE) plaquée contre le bout du CR
+        const web=box(upnT, hU, upnH, C_BEAM);
+        web.position.set(xEnd + sx*upnT*0.5, yU, z); root.add(web);
+        // 2 ailes du U : retours vers l'EXTÉRIEUR (au-delà du bout du CR)
+        [-1,1].forEach(sz=>{
+          const fl=box(upnW, hU, upnT, C_BEAM);
+          fl.position.set(xEnd + sx*upnW*0.5, yU, z + sz*(upnH*0.5 - upnT*0.5));
+          root.add(fl);
+        });
+      });
+    }
+
+    // Cornières de renfort déversement, coiffant le bord de la semelle sup :
+    //  • aile HORIZONTALE dans la continuité de la semelle (au même niveau,
+    //    prolongée vers l'extérieur) ;
+    //  • aile VERTICALE rabattue vers le BAS le long du chant de la semelle.
+    if(GEO.ltb_reinforced){
+      const flHalf = bh*0.31;             // demi-largeur de semelle (b≈0.62h)
+      const leg = bh*0.34;                // longueur d'aile cornière (visuel)
+      const th  = Math.max(bh*0.05, 5);   // épaisseur cornière
+      const yTopFl = yAxis + bh/2;        // niveau du dessus de semelle
+      [-1,1].forEach(sw=>{                // sw=-1 → bord -Z ; sw=+1 → bord +Z
+        const edge = z + sw*flHalf;       // bord de la semelle de CETTE voie
+        // aile HORIZONTALE : prolonge la semelle vers l'extérieur, même niveau
+        const fh=box(L, th, leg, 0x5f6b77);
+        fh.position.set(0, yTopFl - th*0.5, edge + sw*leg*0.5); root.add(fh);
+        // aile VERTICALE : à l'EXTRÉMITÉ extérieure de l'aile horizontale
+        // (le plus loin possible de la poutre), descend vers le bas.
+        const fv=box(L, leg, th, 0x5f6b77);
+        fv.position.set(0, yTopFl - leg*0.5, edge + sw*(leg - th*0.5)); root.add(fv);
+      });
+    }
+  });
+
+  // Niveau de roulement du pont (dessus rail en posé, sous voie en suspendu)
+  const railTopY = GEO.is_suspendu ? (yAxis - bh/2) : (yAxis + bh/2 + railH);
+  if(!GEO.is_suspendu){
+    // Rails posés sur les CR
+    [zRunL,zRunR].forEach(z=>{
+      const rl=box(L,railH,railW,C_RAIL);
+      rl.position.set(0, yAxis + bh/2 + railH/2, z); root.add(rl);
+    });
+  }
+
+  // ── Pont(s) ABUS : 1 ou 2 selon le config ────────────────────────────────
+  const nP = GEO.nbre_pont||1;
+  if(nP===2){
+    const c1=GEO.carriage1, c2=GEO.carriage2||GEO.carriage1;
+    // Longueur réelle de sommier (doit suivre abusCrane : max(carriage*1.25, bh*4))
+    const somL1=Math.max(c1*1.1, bh*3.2), somL2=Math.max(c2*1.1, bh*3.2);
+    // space_btw = écart LIBRE entre les extrémités des sommiers des 2 ponts.
+    // Entraxe = space_btw + demi-sommier de chaque pont.
+    let gapEnds = GEO.space_btw||0;
+    if(gapEnds < bh*0.5) gapEnds = Math.max(c1,c2)*0.6;   // garde-fou anti-chevauchement
+    const entraxe = gapEnds + somL1/2 + somL2/2;
+    root.add(abusCrane(runGap, railTopY, bh, GEO.is_suspendu, c1, -entraxe/2, GEO.rv1));
+    root.add(abusCrane(runGap, railTopY, bh, GEO.is_suspendu, c2, +entraxe/2, GEO.rv2||GEO.rv1));
+  } else {
+    root.add(abusCrane(runGap, railTopY, bh, GEO.is_suspendu, GEO.carriage1, 0, GEO.rv1));
+  }
+
+  buildMidConfig(x0,L,gap,hCol,ch,C_COL,C_BRACE,zL,zR,yAxis,bh);
+
+  // Plan horizontal (grille) au niveau de l'embase des colonnes (y=0 = base).
+  const grid=new THREE.GridHelper(Math.max(L,gap)*1.7,28,0xaebccb,0xd2dce6);
+  grid.position.y=0;
+  root.add(grid);
+}
+
+// Contreventement en X dans le PLAN LONGITUDINAL (le long des CR), entre deux
+// colonnes successives d'une MÊME file (plans verticaux z=zL et z=zR) — config
+// « Bracing ». OU double colonne (twin) au portique central — « Twin column ».
+function buildMidConfig(x0,L,gap,hcol,ch,C_COL,C_BRACE,zL,zR,yAxis,bh){
+  if(!GEO.has_columns) return;
+  const xs=GEO.support_x;
+  // travée centrale : couple d'appuis encadrant le milieu
+  let xa=xs[0], xb=xs[xs.length-1];
+  for(let i=0;i<xs.length-1;i++){ if(xs[i]<=L/2 && xs[i+1]>=L/2){ xa=xs[i]; xb=xs[i+1]; break; } }
+  const X1=x0+xa, X2=x0+xb;
+
+  if(GEO.has_brace){
+    // X longitudinal dans chaque file (z=zL et z=zR), entre les 2 colonnes
+    // de la travée centrale.
+    const s=ch*0.24, yb=40, yt=hcol-40;
+    [zL,zR].forEach(z=>{
+      root.add(strut(X1,yb,z, X2,yt,z, s,C_BRACE));
+      root.add(strut(X2,yb,z, X1,yt,z, s,C_BRACE));
+    });
+  } else if(GEO.has_twin){
+    // Double colonne : 2e colonne à 500 mm d'une colonne CENTRALE réelle.
+    // On choisit la colonne la plus proche du milieu (celle de gauche si
+    // nombre pair), et la 2e colonne est décalée de 500 mm vers le centre.
+    let xc=xs[0], best=1e12;
+    for(let i=0;i<xs.length;i++){
+      const d=Math.abs(xs[i]-L/2);
+      if(d<best-1){ best=d; xc=xs[i]; }   // -1 : tolérance, garde la gauche si égalité
+    }
+    const xm=x0+xc;                    // colonne centrale (réelle)
+    // 2e colonne décalée de 500 mm, du côté du centre de l'ouvrage
+    const dir=(xc < L/2) ? +1 : -1;
+    const off=500*dir;
+    [zL,zR].forEach(z=>{
+      root.add(ibeam(hcol,ch,'y',xm+off,hcol/2,z,C_COL,'x'));
+      root.add(footing(xm+off,z,ch));
+      // Liens horizontaux répartis sur la hauteur, entre les 2 axes de colonnes
+      const nTie=4;
+      for(let k=1;k<=nTie;k++){
+        const yk=hcol*k/(nTie+1);
+        const tie=box(Math.abs(off),ch*0.28,ch*0.28,C_COL);
+        tie.position.set(xm+off/2,yk,z); root.add(tie);
+      }
+    });
+  }
+}
+
+function updateCamera(){
+  const cx=target.x+dist*Math.cos(rotX)*Math.sin(rotY);
+  const cy=target.y+dist*Math.sin(rotX);
+  const cz=target.z+dist*Math.cos(rotX)*Math.cos(rotY);
+  camera.position.set(cx,cy,cz); camera.lookAt(target.x,target.y,target.z);
+}
+function animate(){requestAnimationFrame(animate); updateCamera(); renderer.render(scene,camera);}
+function bindControls(host){
+  const el=renderer.domElement;
+  el.addEventListener('mousedown',e=>{isDown=true;btn=e.button;lx=e.clientX;ly=e.clientY;e.preventDefault();});
+  window.addEventListener('mouseup',()=>isDown=false);
+  window.addEventListener('mousemove',e=>{
+    if(!isDown)return; const dx=e.clientX-lx,dy=e.clientY-ly; lx=e.clientX; ly=e.clientY;
+    if(btn===2){const s=dist*0.0012; target.x-=dx*s*Math.cos(rotY); target.z+=dx*s*Math.sin(rotY); target.y+=dy*s;}
+    else{rotY-=dx*0.008; rotX+=dy*0.008; rotX=Math.max(-1.45,Math.min(1.45,rotX));}
+  });
+  el.addEventListener('contextmenu',e=>e.preventDefault());
+  el.addEventListener('wheel',e=>{dist*=(1+(e.deltaY>0?0.1:-0.1)); dist=Math.max(500,dist); e.preventDefault();},{passive:false});
+  window.addEventListener('resize',()=>{const W=host.clientWidth,H=host.clientHeight; camera.aspect=W/H; camera.updateProjectionMatrix(); renderer.setSize(W,H);});
+}
+function resetView(){rotX=0.52; rotY=0.72; target={x:0,y:0,z:0}; dist=Math.max(GEO.L_tot,GEO.rail_gap,GEO.h_rail)*2.0;}
+window.addEventListener('load',init);
+</script>
+</body>
+</html>"""
+
+    html = (html
+            .replace("__GEO_JSON__", geo_json)
+            .replace("__SPEC_ROWS__", spec_html)
+            .replace("__COL_SECTION__", col_section)
+            .replace("__XB_SECTION__", xb_section)
+            .replace("__CLIENT__", str(client))
+            .replace("__PROJECT__", str(project))
+            .replace("__DATE__", str(today)))
+
+    return html.encode("utf-8")
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1753,13 +2643,13 @@ def render_railway_sizing_tab():
         )
     with c16:
         # Crane span = portée du pont entre les 2 chemins de roulement.
-        # N'apparaît que pour un portique Olsen AVEC pont SUSPENDU (la cross
-        # beam de suspension n'existe que dans ce cas). Sinon, valeur nulle.
-        if appui_type == "Olsen" and is_suspendu:
-            _lcs = "Crane span [mm] ❌" if not ss.get("rs_crane_span","") else "Crane span [mm]"
-            crane_span = _ni(_lcs, "rs_crane_span")
-        else:
-            crane_span = ""
+        # TOUJOURS visible et obligatoire : sert au dimensionnement de la cross
+        # beam (suspendu) ET à la géométrie réelle du pont dans le rendu 3D
+        # (posé comme suspendu).
+        _lcs = "Crane span [mm] ❌" if not ss.get("rs_crane_span","") else "Crane span [mm]"
+        crane_span = _ni(_lcs, "rs_crane_span")
+    if not _safe(crane_span):
+        st.warning("⚠️ Renseigner Crane span (portée du pont entre rails) — requis pour le calcul.")
 
     # ── Colonnes Olsen (si appui = Olsen) ───────────────────────────────────
     # Init hidden defaults before any widget.
@@ -1894,6 +2784,13 @@ def render_railway_sizing_tab():
         if not is_suspendu and not _safe(rail_p):   errs.append("Rail price requis")
         if not _safe(lasercut_p):                   errs.append("Lasercut price requis")
         if not _safe(paint_p):                      errs.append("Paint price requis")
+        # Crane span (portée du pont entre rails) : toujours obligatoire — sert
+        # au dimensionnement (cross beam en suspendu) et au rendu 3D du pont.
+        if not _safe(crane_span):
+            errs.append(
+                "Crane span requis : portée du pont entre les 2 chemins de "
+                "roulement (utilisée pour la cross beam et la géométrie du pont)."
+            )
 
         # Cohérence dimensionnelle : entraxe appuis (= span) ≤ longueur totale
         _tl = _safe(total_length)
@@ -1932,6 +2829,23 @@ def render_railway_sizing_tab():
                 crane_type=crane_type,
                 crane_span_mm=_safe(crane_span),
             )
+            # ── Stocker TOUS les inputs dans le résultat (résumé PDF complet) ──
+            if _res is not None:
+                _res["col_type"]    = col_type
+                _res["col_config"]  = col_config
+                _res["rail_height_mm"] = _safe(rail_height)
+                _res["crane_qty"]   = crane_qty
+                # Forces pont 1
+                _res["HT3_kN"] = _safe(HT3); _res["HS_kN"] = _safe(HS); _res["HL_kN"] = _safe(HL)
+                # Forces pont 2 (si applicable)
+                _res["HT3_2_kN"] = _safe(HT3_2) if crane_qty == 2 else 0.0
+                _res["HS_2_kN"]  = _safe(HS_2)  if crane_qty == 2 else 0.0
+                _res["HL_2_kN"]  = _safe(HL_2)  if crane_qty == 2 else 0.0
+                # Prix
+                _res["price_steel"]    = _safe(steel_p,    DEFAULT_STEEL_PRICE)
+                _res["price_rail"]     = _safe(rail_p,     DEFAULT_RAIL_PRICE)
+                _res["price_lasercut"] = _safe(lasercut_p, DEFAULT_LASERCUT_PRICE)
+                _res["price_paint"]    = _safe(paint_p,    DEFAULT_PAINT_PRICE)
             # ── Calcul colonnes Olsen ─────────────────────────────────────────
             if appui_type == "Olsen":
                 if not _safe(rail_height):
@@ -1955,6 +2869,30 @@ def render_railway_sizing_tab():
                     _HL  *= 0.5
                 # n_appuis total = depuis le résultat CR
                 _n_app = int(_res.get("n_appuis", 4)) if not _res.get("error") else 4
+
+                # Prix (définis tôt : utilisés dès le pré-calcul cross beam)
+                _sp  = _safe(steel_p,    DEFAULT_STEEL_PRICE)
+                _lcp = _safe(lasercut_p, DEFAULT_LASERCUT_PRICE)
+                _pp  = _safe(paint_p,    DEFAULT_PAINT_PRICE)
+
+                # ── Pré-calcul CROSS BEAM (pont suspendu uniquement) ─────────
+                # On calcule la cross beam AVANT les colonnes pour récupérer sa
+                # hauteur de section : en suspendu, la hauteur de colonne =
+                # h_rail + h_poutre_CR + h_cross_beam.
+                _xb = None
+                _crane_span = float(_res.get("crane_span_mm", 0) or 0)
+                if is_suspendu and _crane_span > 0:
+                    _xb = compute_cross_beam(
+                        col_type        = col_type,
+                        crane_span_mm   = _crane_span,
+                        R_max_kN        = float(_res.get("R_max_kN", 0.0)),
+                        n_appuis_total  = _n_app,
+                        steel_price     = _sp,
+                        lasercut_price  = _lcp,
+                        paint_price     = _pp,
+                    )
+                _xb_h = float(_xb.get("size", 0)) if (_xb and not _xb.get("error")) else 0.0
+
                 _col_best, _col_all = compute_columns(
                     col_type          = col_type,
                     h_rail_mm         = _safe(rail_height),
@@ -1969,6 +2907,8 @@ def render_railway_sizing_tab():
                     n_appuis_total     = _n_app,
                     sommier_chariot_mm = _safe(carriage),
                     entraxe_col_mm     = _safe(support_spacing),
+                    is_suspendu        = is_suspendu,
+                    h_cross_beam_mm    = _xb_h,
                 )
                 # Compute column costs (using same prices as CR)
                 if _col_best:
@@ -2017,9 +2957,6 @@ def render_railway_sizing_tab():
                     _m_div_col  = round(_m_div_unit * _n_cols_total)
                     # Boulonnerie embase: 80€ par colonne
                     _boul_col = _n_cols_total * 80
-                    _sp  = _safe(steel_p,    DEFAULT_STEEL_PRICE)
-                    _lcp = _safe(lasercut_p, DEFAULT_LASERCUT_PRICE)
-                    _pp  = _safe(paint_p,    DEFAULT_PAINT_PRICE)
                     _col_best.update({
                         "n_cols_total":  _n_cols_total,
                         "m_corniere":    round(_m_corniere),
@@ -2035,25 +2972,16 @@ def render_railway_sizing_tab():
                     })
                 _res["col_result"] = _col_best
                 _res["col_config"] = col_config
+                # Inputs Olsen (pour résumé PDF)
+                _res["col_type"]    = col_type
+                _res["rail_height_mm"] = _safe(rail_height)
+                _res["HT3_kN"] = _safe(HT3); _res["HS_kN"] = _safe(HS); _res["HL_kN"] = _safe(HL)
+                _res["crane_qty"] = crane_qty
 
                 # ── CROSS BEAM (poutre de suspension du portique) ────────────
-                # UNIQUEMENT pour un pont SUSPENDU (le pont posé roule sur les
-                # rails, pas de poutre de suspension à dimensionner).
-                # Une poutre par portique (n_appuis_total / 2), longueur =
-                # crane_span + 2×500 mm, chargée par 2× R_max du CR espacées
-                # de crane_span. Sélection même type que la colonne, flèche L/600.
-                _crane_span = float(_res.get("crane_span_mm", 0) or 0)
+                # Déjà pré-calculée plus haut (_xb) pour la hauteur de colonne.
+                # On la réutilise telle quelle en pont suspendu.
                 if is_suspendu and _crane_span > 0:
-                    _R_max = float(_res.get("R_max_kN", 0.0))
-                    _xb = compute_cross_beam(
-                        col_type        = col_type,
-                        crane_span_mm   = _crane_span,
-                        R_max_kN        = _R_max,
-                        n_appuis_total  = int(_res.get("n_appuis", 4)),
-                        steel_price     = _sp,
-                        lasercut_price  = _lcp,
-                        paint_price     = _pp,
-                    )
                     _res["extra_beam"] = _xb
                     # Les divers de la cross beam sont comptés SÉPARÉMENT
                     # (dans le bloc Cross beam), pas fusionnés dans Misc. col.
@@ -2063,6 +2991,7 @@ def render_railway_sizing_tab():
                 _res["col_result"] = None
                 _res["col_config"] = None
                 _res["extra_beam"] = None
+                _res["crane_qty"] = crane_qty
             ss["rs_result"] = _res
             # Mémoriser la signature des données structurelles utilisées
             # pour ce calcul → permet de détecter une modification ultérieure
@@ -2096,6 +3025,8 @@ def render_railway_sizing_tab():
             if not r.get("is_suspendu"):
                 _rr("Rail",          r.get("rail_short") or r["rail_label"],   "")
             _rr("Beam mass", f"{r['m1']} kg",                          f"{r['a']} €")
+            if r.get("ltb_reinforced"):
+                _rr(f"   incl. angle iron {r.get('angle_label','')}", "", "")
             if not r.get("is_suspendu"):
                 _rr("Rail mass",   f"{r['m2']} kg",                          f"{r['b']} €")
             _rr("Lasercut mass",  f"{r['m3']} kg",                          f"{r['c']} €")
@@ -2160,7 +3091,7 @@ def render_railway_sizing_tab():
                 _rr("Type",               col.get("col_label","—"),       "")
                 _rr("Column mass",     f"{col.get('m_col',0)} kg",     f"{col.get('a_col',0)} €")
                 if col.get("m_corniere",0) > 0:
-                    _rr("  incl. angle iron 70×70×6", f"{col.get('m_corniere',0)} kg", "")
+                    _rr("   incl. bracing 70×70×6", "", "")
                 _rr("Lasercut col.",f"{col.get('m_div_col',0)} kg", f"{col.get('c_col',0)} €")
                 _rr("Paint col.",    f"{col.get('peinture_col',0)} L",f"{col.get('d_col',0)} €")
                 _rr("Bolts col.", f"{col.get('n_cols_total',0)} col.", f"{col.get('boul_col',0)} €")
@@ -2270,10 +3201,29 @@ def render_railway_sizing_tab():
                     unsafe_allow_html=True,
                 )
 
-        # Export PDF — bouton un peu plus bas
+        # Export PDF + Extrait technique client (3D) — boutons côte à côte
         st.divider()
         st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
-        _, ecol = st.columns([4,1])
+        _, tcol, ecol = st.columns([2, 1, 1])
+        with tcol:
+            try:
+                tech_bytes = _make_tech_extract_html(r)
+                tfname = (
+                    f"Extrait-technique-{_sanitize_filename(r.get('project') or 'NA')}"
+                    f"-{_sanitize_filename(r.get('client') or 'NA')}.html"
+                )
+                st.download_button(
+                    label="🧩 Extrait technique 3D",
+                    data=tech_bytes,
+                    file_name=tfname,
+                    mime="text/html",
+                    use_container_width=True,
+                    key="rs_tech_extract",
+                    help="Fiche technique client avec un visuel 3D interactif "
+                         "de la structure (à ouvrir dans un navigateur).",
+                )
+            except Exception as ex:
+                st.warning(f"Extrait technique non disponible : {ex}")
         with ecol:
             try:
                 pdf_bytes = _make_pdf_bytes(r)

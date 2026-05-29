@@ -91,7 +91,7 @@ def _int_input(label, key, help=None, disabled=False, max_val=None):
 
     return st.text_input(label, help=help, disabled=disabled, key=key, on_change=_on_change)
 
-def _load_input(key, label="Load [kg,t]"):
+def _load_input(key, label="Load [kg,t]", disabled=False):
     """Load: digits, decimal point, and unit chars (t/k/g) + operators (+/-/x)."""
     # Valid chars: 0-9  .  t  k  g  +  -  /  space
     # (k and g only valid together as 'kg', t alone as 't' — we allow the chars,
@@ -111,10 +111,11 @@ def _load_input(key, label="Load [kg,t]"):
         label,
         help="ex : 10t, 500kg, 3.2t+3.2t …",
         key=key,
+        disabled=disabled,
         on_change=_on_change,
     )
 
-def _span_input(key, label="Span [mm]"):
+def _span_input(key, label="Span [mm]", disabled=False):
     """Span text_input: digits and one 'x' only (e.g. 4000x7500)."""
     def _clean(raw):
         s = re.sub(r"[^0-9xX]", "", str(raw)).replace("X", "x")
@@ -129,7 +130,7 @@ def _span_input(key, label="Span [mm]"):
     def _on_change():
         ss[key] = _clean(ss.get(key, ""))
 
-    return st.text_input(label, key=key, on_change=_on_change)
+    return st.text_input(label, key=key, disabled=disabled, on_change=_on_change)
 
 def is_near(value, exclude_list, threshold):
     value = value.lower()
@@ -264,12 +265,17 @@ def validate_span(span):
     if span == "": return True
     return bool(re.fullmatch(r'\d+', span) or re.fullmatch(r'\d+x\d+', span))
 
-def check_article_fields(project, category, product, type_, load, span, product_values, type_values):
+def check_article_fields(project, category, product, type_, load, span,
+                         product_values, type_values, update_mode=False):
     ok, errs = True, {}
+    # En mode UPDATE, aucun champ d'article n'est requis : l'article est
+    # identifié par sa référence (sélecteur dédié), et le projet est optionnel.
+    if update_mode:
+        return ok, errs
     if not validate_project(project):
         errs["project"] = "Format: Sxx-xxxxx ou Sxx-xxxxx_x"
         ok = False
-    if product_values and category == "":
+    if category == "":
         errs["category"] = "Requis"
         ok = False
     if product_values and not product:
@@ -287,8 +293,12 @@ def check_article_fields(project, category, product, type_, load, span, product_
     return ok, errs
 
 def check_purchase_sale_fields(category, user_address, purchase_ref,
-                                gross_price, net_price, delay, margin, discountS):
+                                gross_price, net_price, delay, margin, discountS,
+                                update_mode=False):
     ok, errs = True, {}
+    # Les détails achat/vente sont requis aussi bien en création qu'en mise à
+    # jour (mêmes croix rouges). En mode UPDATE, la catégorie est vide → pas de
+    # cas OLSEN BEL particulier.
     olsen_bel = (category == "OLSEN" and user_address == "OLSEN ENGINEERING (BEL)")
 
     if gross_price == "" and net_price == "" and not olsen_bel:
@@ -543,6 +553,133 @@ def do_add_article(
         _append_technical_data(db_name, models_url, uid, password, project, tech_text)
 
 
+def fetch_articles_for_project(uid, password, project, db_name, models_url):
+    """Retourne les articles Odoo dont la référence (default_code) contient le
+    projet. Liste de tuples (id, default_code, name)."""
+    project = (project or "").strip()
+    if not project:
+        return []
+    models = xmlrpc.client.ServerProxy(models_url)
+    try:
+        ids = models.execute_kw(
+            db_name, uid, password,
+            "product.product", "search",
+            [[("default_code", "ilike", project)]],
+            {"limit": 300},
+        )
+        if not ids:
+            return []
+        recs = models.execute_kw(
+            db_name, uid, password,
+            "product.product", "read",
+            [ids], {"fields": ["default_code", "name"]},
+        )
+        return [
+            (r["id"], r.get("default_code") or "", r.get("name") or "")
+            for r in recs if r.get("default_code")
+        ]
+    except Exception as e:
+        st.warning(f"⚠️ Impossible de charger les articles du projet : {e}")
+        return []
+
+
+def do_update_article(
+    db_name, models_url,
+    uid, password,
+    user_address,
+    reference,
+    purchase_ref, net_price, delay,
+    sale_desc, sale_price, weight,
+    purchase_desc,
+    debug=False,
+):
+    """Met à jour un article EXISTANT (identifié par sa référence default_code).
+
+    Logique « patch » : seuls les champs renseignés (non vides) sont écrits, afin
+    de ne jamais effacer accidentellement une valeur existante.
+    Champs mis à jour :
+      • Article (product / template) : standard_price (coût), list_price (prix de
+        vente), sale_delay (délai), weight, description_purchase, description_sale.
+      • Détails d'achat (product.supplierinfo) : product_code (réf. fournisseur),
+        price (coût), delay.
+    """
+    models_proxy = xmlrpc.client.ServerProxy(models_url)
+
+    pids = models_proxy.execute_kw(
+        db_name, uid, password,
+        "product.product", "search",
+        [[("default_code", "=", reference)]],
+    )
+    if not pids:
+        return False, f"⚠️ Aucun article trouvé avec la référence : {reference}"
+    product_id = pids[0]
+
+    company_id = 2 if user_address == "OLSEN ENGINEERING (LUX)" else 1
+
+    # ── 1) product.product ────────────────────────────────────────────────────
+    p_vals = {}
+    if str(net_price).strip():   p_vals["standard_price"] = safe_float(net_price)
+    if str(sale_price).strip():  p_vals["list_price"]     = safe_float(sale_price)
+    if str(delay).strip():       p_vals["sale_delay"]     = safe_int(delay)
+    if str(weight).strip():      p_vals["weight"]         = safe_float(weight)
+    if p_vals:
+        models_proxy.execute_kw(
+            db_name, uid, password,
+            "product.product", "write",
+            [[product_id], p_vals],
+        )
+
+    # ── template id ───────────────────────────────────────────────────────────
+    tmpl_data = models_proxy.execute_kw(
+        db_name, uid, password,
+        "product.product", "read",
+        [product_id], {"fields": ["product_tmpl_id"]},
+    )
+    tmpl_id = tmpl_data[0]["product_tmpl_id"][0]
+
+    # ── 2) descriptions (product.template) ─────────────────────────────────────
+    t_vals = {}
+    if str(purchase_desc).strip(): t_vals["description_purchase"] = purchase_desc
+    if str(sale_desc).strip():     t_vals["description_sale"]     = sale_desc
+    if t_vals:
+        models_proxy.execute_kw(
+            db_name, uid, password,
+            "product.template", "write",
+            [[tmpl_id], t_vals],
+        )
+
+    # ── standard price pour société LUX ────────────────────────────────────────
+    if company_id == 2 and str(net_price).strip():
+        models_proxy.execute_kw(
+            db_name, uid, password,
+            "product.template", "write",
+            [[tmpl_id], {"standard_price": safe_float(net_price)}],
+            {"context": {"allowed_company_ids": [company_id], "company_id": company_id}},
+        )
+
+    # ── 3) détails d'achat (product.supplierinfo) ─────────────────────────────
+    si_ids = models_proxy.execute_kw(
+        db_name, uid, password,
+        "product.supplierinfo", "search",
+        [[("product_tmpl_id", "=", tmpl_id)]],
+    )
+    si_vals = {}
+    if str(purchase_ref).strip(): si_vals["product_code"] = purchase_ref
+    if str(net_price).strip():    si_vals["price"]        = safe_float(net_price)
+    if str(delay).strip():        si_vals["delay"]        = safe_int(delay)
+    if si_ids and si_vals:
+        models_proxy.execute_kw(
+            db_name, uid, password,
+            "product.supplierinfo", "write",
+            [si_ids, si_vals],
+        )
+    elif not si_ids and si_vals:
+        st.warning("⚠️ Aucun détail d'achat (supplierinfo) existant à mettre à jour "
+                   "pour cet article — réf. fournisseur / coût non écrits côté achat.")
+
+    return True, f"✅ Article mis à jour : {reference}  (ID : {product_id})"
+
+
 def _append_technical_data(db_name, models_url, uid, password, project, new_text):
     models_proxy = xmlrpc.client.ServerProxy(models_url)
     order_id = models_proxy.execute_kw(
@@ -577,6 +714,19 @@ def render_add_article_tab(db_name, models_url, debug=False):
     """Main entry point — call from app.py inside the tab."""
     ct = ss.get("clear_trigger", 0)
 
+    # ── Mode UPDATE ────────────────────────────────────────────────────────────
+    # Réinitialise le toggle à OFF après une mise à jour réussie (le flag est posé
+    # par le handler du bouton AVANT le rerun, pour éviter de modifier la valeur
+    # d'un widget déjà instancié).
+    if ss.get("_aa_reset_update_toggle"):
+        ss["aa_update_mode"] = False
+        ss["_aa_reset_update_toggle"] = False
+    _upd_msg = ss.pop("_aa_update_msg", None)
+    if _upd_msg:
+        st.success(_upd_msg)
+
+    update_mode = bool(ss.get("aa_update_mode", False))
+
     def _sv(key, default=""):
         return ss.get(key, default) or default
 
@@ -603,6 +753,13 @@ def render_add_article_tab(db_name, models_url, debug=False):
     discS_cur    = _sv(discS_key)
     delay_cur    = _sv(delay_key)
 
+    # En mode UPDATE, les champs d'article sont masqués et rendus avec une valeur
+    # vide → on neutralise leurs valeurs courantes pour que la validation des
+    # détails achat/vente cible les mêmes clés de widgets (catégorie/produit "").
+    if update_mode:
+        category_cur = product_cur = type_cur = ""
+        load_cur = span_cur = ""
+
     product_values_cur = ss.get("category_to_products", {}).get(category_cur, []) if category_cur else []
     type_values_cur    = ss.get("category_product_to_types", {}).get((category_cur, product_cur), []) if (category_cur and product_cur) else []
     d1_cur, d2_cur     = compute_discounts(category_cur, product_cur, type_cur)
@@ -618,10 +775,12 @@ def render_add_article_tab(db_name, models_url, debug=False):
     net_display_cur = str(net_val_cur) if gross_cur else net_cur
 
     _, art_errs = check_article_fields(project_cur, category_cur, product_cur, type_cur,
-                                        load_cur, span_cur, product_values_cur, type_values_cur)
+                                        load_cur, span_cur, product_values_cur, type_values_cur,
+                                        update_mode=update_mode)
     _, ps_errs  = check_purchase_sale_fields(category_cur, ss.get("user_address",""),
                                               pref_cur, gross_cur, net_display_cur,
-                                              delay_cur, margin_cur, discS_cur)
+                                              delay_cur, margin_cur, discS_cur,
+                                              update_mode=update_mode)
 
     # ── CSS: color labels red for invalid fields using input[id] selector ─────
     # Streamlit sets id="key" on the actual input element.
@@ -644,88 +803,117 @@ def render_add_article_tab(db_name, models_url, debug=False):
 
     # ── Section : Article details ─────────────────────────────────────────────
     st.markdown("### 📦 Article details")
-    col1, col2, col3, col4, col5 = st.columns(5)
 
-    with col1:
-        _lp = "Project ❌" if "project" in art_errs else "Project"
-        project = st.selectbox(
-            _lp,
-            options=[""] + list(ss.get("sale_orders_ref", {}).keys()),
-            help="Sxx-xxxxx ou Sxx-xxxxx_x",
-            accept_new_options=True,
-            key=project_key,
-        )
-        project = project or ""
-    with col2:
-        _lc = "Category ❌" if "category" in art_errs else "Category"
-        category = st.selectbox(
-            _lc,
-            options=ss.get("category_list", []),
-            index=None,
-            key=category_key,
-        )
+    update_target_ref = ""
 
-    product_values = ss.get("category_to_products", {}).get(category, []) if category else []
-    with col3:
-        _lprod = "Product ❌" if "product" in art_errs else "Product"
-        product = st.selectbox(
-            _lprod,
-            options=product_values,
-            index=None,
-            disabled=not product_values,
-            key=product_key,
-        )
+    if update_mode:
+        # En mode UPDATE : on affiche UNIQUEMENT la référence de l'article à
+        # mettre à jour (saisie libre). Tous les autres champs d'article
+        # (Project, Category, Product, Type, Addition, Load, Span) sont masqués.
 
-    type_values = ss.get("category_product_to_types", {}).get((category, product), []) if (category and product) else []
-    with col4:
-        _ltype = "Type ❌" if "type" in art_errs else "Type"
-        type_ = st.selectbox(
-            _ltype,
-            options=type_values,
-            index=None,
-            disabled=not type_values,
-            key=type_key,
-        )
+        # Valeurs neutres pour les champs masqués (utilisées en aval sans effet).
+        project = _sv(project_key)
+        category = ""; product = ""; type_ = ""; addition = ""
+        load = ""; span = ""
+        product_values = []; type_values = []
+        sid = sabb = None
+        categ_id = None
+        d1 = d2 = 0
+        art_name = art_ref = ""
 
-    # Normalize None → empty string after selectboxes
+        uc1, _uc2 = st.columns([2, 3])
+        with uc1:
+            _lut = "🔄 Article to update (reference)"
+            if not _sv(f"aa_update_target_{ct}"):
+                _lut += " ❌"
+            update_target_ref = st.text_input(
+                _lut,
+                placeholder="ex : ABU_PR_…_S25-12345",
+                help="Référence (default_code) de l'article existant à mettre à jour.",
+                key=f"aa_update_target_{ct}",
+            ).strip()
 
-    with col5:
-        addition = st.text_input(
-            "Addition",
-            help="Ajout au produit — non obligatoire",
-            key=f"aa_addition_{ct}",
-        )
+    else:
+        col1, col2, col3, col4, col5 = st.columns(5)
 
-    ca, cb, _ = st.columns([1, 1, 3])
-    with ca:
-        _lload = "Load [kg,t] ❌" if "load" in art_errs else "Load [kg,t]"
-        load = _load_input(load_key, label=_lload)
-    with cb:
-        _lspan = "Span [mm] ❌" if "span" in art_errs else "Span [mm]"
-        span = _span_input(span_key, label=_lspan)
+        with col1:
+            _lp = "Project ❌" if "project" in art_errs else "Project"
+            project = st.selectbox(
+                _lp,
+                options=[""] + list(ss.get("sale_orders_ref", {}).keys()),
+                help="Sxx-xxxxx ou Sxx-xxxxx_x",
+                accept_new_options=True,
+                key=project_key,
+            )
+            project = project or ""
+        with col2:
+            _lc = "Category ❌" if "category" in art_errs else "Category"
+            category = st.selectbox(
+                _lc,
+                options=ss.get("category_list", []),
+                index=None,
+                key=category_key,
+            )
 
-    # ── Computed : article name & reference ───────────────────────────────────
-    sid, sabb = get_supplier_info(category)
-    categ_id  = get_article_category(ss.get("article_table", []), category, product, type_)
-    d1, d2    = compute_discounts(category, product, type_)
-    art_name  = build_article_name(product, category, type_, addition, load, span)
-    art_ref   = build_reference(sabb or "", product, addition, project,
-                                product_values, bool(product_values and product))
+        product_values = ss.get("category_to_products", {}).get(category, []) if category else []
+        with col3:
+            _lprod = "Product ❌" if "product" in art_errs else "Product"
+            product = st.selectbox(
+                _lprod,
+                options=product_values,
+                index=None,
+                disabled=not product_values,
+                key=product_key,
+            )
 
-    st.markdown("<div style='margin-top:0.6rem'></div>", unsafe_allow_html=True)
-    cn, cr = st.columns([3, 2])
-    with cn:
-        st.markdown(
-            f"**Product Name :**&nbsp;&nbsp;"
-            f'<span style="color:#ffcc00;font-weight:700;font-style:italic;">{art_name or "—"}</span>',
-            unsafe_allow_html=True,
-        )
-    with cr:
-        st.markdown(
-            f"**Reference :**&nbsp;&nbsp;"
-            f'<span style="color:#ffcc00;font-weight:700;font-style:italic;">{art_ref or "—"}</span>',
-            unsafe_allow_html=True,
-        )
+        type_values = ss.get("category_product_to_types", {}).get((category, product), []) if (category and product) else []
+        with col4:
+            _ltype = "Type ❌" if "type" in art_errs else "Type"
+            type_ = st.selectbox(
+                _ltype,
+                options=type_values,
+                index=None,
+                disabled=not type_values,
+                key=type_key,
+            )
+
+        with col5:
+            addition = st.text_input(
+                "Addition",
+                help="Ajout au produit — non obligatoire",
+                key=f"aa_addition_{ct}",
+            )
+
+        ca, cb, _ = st.columns([1, 1, 3])
+        with ca:
+            _lload = "Load [kg,t] ❌" if "load" in art_errs else "Load [kg,t]"
+            load = _load_input(load_key, label=_lload)
+        with cb:
+            _lspan = "Span [mm] ❌" if "span" in art_errs else "Span [mm]"
+            span = _span_input(span_key, label=_lspan)
+
+        # ── Computed : article name & reference ───────────────────────────────
+        sid, sabb = get_supplier_info(category)
+        categ_id  = get_article_category(ss.get("article_table", []), category, product, type_)
+        d1, d2    = compute_discounts(category, product, type_)
+        art_name  = build_article_name(product, category, type_, addition, load, span)
+        art_ref   = build_reference(sabb or "", product, addition, project,
+                                    product_values, bool(product_values and product))
+
+        st.markdown("<div style='margin-top:0.6rem'></div>", unsafe_allow_html=True)
+        cn, cr = st.columns([3, 2])
+        with cn:
+            st.markdown(
+                f"**Product Name :**&nbsp;&nbsp;"
+                f'<span style="color:#ffcc00;font-weight:700;font-style:italic;">{art_name or "—"}</span>',
+                unsafe_allow_html=True,
+            )
+        with cr:
+            st.markdown(
+                f"**Reference :**&nbsp;&nbsp;"
+                f'<span style="color:#ffcc00;font-weight:700;font-style:italic;">{art_ref or "—"}</span>',
+                unsafe_allow_html=True,
+            )
 
     # ── Section : Purchase details ────────────────────────────────────────────
     st.markdown("<div style='margin-top:0.8rem'></div>", unsafe_allow_html=True)
@@ -844,20 +1032,31 @@ def render_add_article_tab(db_name, models_url, debug=False):
 
     # ── Validation for submit ────────────────────────────────────────────────
     art_ok, _ = check_article_fields(project, category, product, type_, load, span,
-                                      product_values, type_values)
+                                      product_values, type_values, update_mode=update_mode)
     ps_ok, _  = check_purchase_sale_fields(
         category, ss.get("user_address", ""),
         purchase_ref, gross_price,
         net_price_display if net_disabled else net_price,
-        delay, margin, discountS,
+        delay, margin, discountS, update_mode=update_mode,
     )
 
     # ── Buttons ───────────────────────────────────────────────────────────────
     st.divider()
     st.markdown("<div style='margin-top:2.2rem'></div>", unsafe_allow_html=True)
-    _, bb1, bb2 = st.columns([4, 1, 1])
+    _, tg, bb1, bb2 = st.columns([3, 1.6, 1.1, 1])
+    with tg:
+        st.markdown("<div style='margin-top:0.45rem'></div>", unsafe_allow_html=True)
+        st.toggle(
+            "Update",
+            key="aa_update_mode",
+            help="ON : met à jour un article EXISTANT (saisir sa référence). "
+                 "Les détails achat/vente sont requis comme en création ; les "
+                 "champs optionnels laissés vides ne sont pas écrits. "
+                 "OFF : création d'un nouvel article.",
+        )
     with bb1:
-        add_clicked = st.button("➕ Add to Odoo", type="primary", use_container_width=True)
+        _btn_label = "🔄 Update in Odoo" if update_mode else "➕ Add to Odoo"
+        add_clicked = st.button(_btn_label, type="primary", use_container_width=True)
     with bb2:
         clear_clicked = st.button("🧹 Clear", use_container_width=True)
 
@@ -868,35 +1067,74 @@ def render_add_article_tab(db_name, models_url, debug=False):
         st.rerun()
 
     if add_clicked:
-        a_ok, a_err = check_article_fields(project, category, product, type_, load, span,
-                                            product_values, type_values)
-        p_ok, p_err = check_purchase_sale_fields(
-            category, ss.get("user_address", ""),
-            purchase_ref, gross_price,
-            net_price_display if net_disabled else net_price,
-            delay, margin, discountS,
-        )
-        if not a_ok or not p_ok:
-            pass  # ❌ shown inline in field labels
-        if a_ok and p_ok:
-            with st.spinner("Création dans Odoo …"):
-                do_add_article(
-                    db_name=db_name, models_url=models_url,
-                    uid=ss.uid, password=ss.password,
-                    user_name=ss.user_name, user_address=ss.get("user_address", ""),
-                    name=art_name, reference=art_ref,
-                    category=category, product=product,
-                    supplier_id=sid, supplier=category,
-                    categ_id=categ_id,
-                    purchase_ref=purchase_ref,
-                    gross_price=gross_price, discountS=discountS,
-                    net_price=net_price_display if net_disabled else net_price,
-                    delay=delay,
-                    sale_desc=sale_desc,
-                    sale_price=str(sale_price_val),
-                    margin=margin, weight=weight,
-                    purchase_desc=purchase_desc,
-                    project=project,
-                    tech_text=ss.get("new_tech_text", ""),
-                    debug=debug,
-                )
+        # ── Mode UPDATE : met à jour un article existant ───────────────────────
+        if update_mode:
+            p_ok, _ = check_purchase_sale_fields(
+                "", ss.get("user_address", ""),
+                purchase_ref, gross_price,
+                net_price_display if net_disabled else net_price,
+                delay, margin, discountS,
+            )
+            if not update_target_ref:
+                st.warning("⚠️ Indiquez la référence de l'article à mettre à jour.")
+            elif not p_ok:
+                pass  # ❌ affichés en ligne sur les détails achat/vente
+            else:
+                with st.spinner("Mise à jour dans Odoo …"):
+                    ok, msg = do_update_article(
+                        db_name=db_name, models_url=models_url,
+                        uid=ss.uid, password=ss.password,
+                        user_address=ss.get("user_address", ""),
+                        reference=update_target_ref,
+                        purchase_ref=purchase_ref,
+                        net_price=net_price_display if net_disabled else net_price,
+                        delay=delay,
+                        sale_desc=sale_desc,
+                        sale_price=str(sale_price_val),
+                        weight=weight,
+                        purchase_desc=purchase_desc,
+                        debug=debug,
+                    )
+                if ok:
+                    # Repasse le toggle à OFF (flag lu en haut du prochain run)
+                    # et affiche le message de succès après le rerun.
+                    ss["_aa_reset_update_toggle"] = True
+                    ss["_aa_update_msg"] = msg
+                    ss.pop("_aa_update_articles_cache", None)
+                    st.rerun()
+                else:
+                    st.warning(msg)
+        # ── Mode CREATION : comportement d'origine ─────────────────────────────
+        else:
+            a_ok, a_err = check_article_fields(project, category, product, type_, load, span,
+                                                product_values, type_values)
+            p_ok, p_err = check_purchase_sale_fields(
+                category, ss.get("user_address", ""),
+                purchase_ref, gross_price,
+                net_price_display if net_disabled else net_price,
+                delay, margin, discountS,
+            )
+            if not a_ok or not p_ok:
+                pass  # ❌ shown inline in field labels
+            if a_ok and p_ok:
+                with st.spinner("Création dans Odoo …"):
+                    do_add_article(
+                        db_name=db_name, models_url=models_url,
+                        uid=ss.uid, password=ss.password,
+                        user_name=ss.user_name, user_address=ss.get("user_address", ""),
+                        name=art_name, reference=art_ref,
+                        category=category, product=product,
+                        supplier_id=sid, supplier=category,
+                        categ_id=categ_id,
+                        purchase_ref=purchase_ref,
+                        gross_price=gross_price, discountS=discountS,
+                        net_price=net_price_display if net_disabled else net_price,
+                        delay=delay,
+                        sale_desc=sale_desc,
+                        sale_price=str(sale_price_val),
+                        margin=margin, weight=weight,
+                        purchase_desc=purchase_desc,
+                        project=project,
+                        tech_text=ss.get("new_tech_text", ""),
+                        debug=debug,
+                    )

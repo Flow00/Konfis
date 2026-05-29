@@ -1470,7 +1470,7 @@ def _make_pdf_bytes(r):
     _nq = int(r.get("crane_qty", r.get("nbre_pont", 1)) or 1)
     tag_items.append(("Cranes", f"{_nq}"))
     if r.get("rv_kN"):
-        tag_items.append(("Rv wheel", f"{r.get('rv_kN',0):.0f} kN"))
+        tag_items.append(("Rv wheel", f"{r.get('rv_kN',0):g} kN"))
     if r.get("carriage_mm"):
         tag_items.append(("Carriage", f"{r.get('carriage_mm',0):.0f} mm"))
     if r.get("appui_type") == "Olsen":
@@ -1479,7 +1479,7 @@ def _make_pdf_bytes(r):
             tag_items.append(("HT3/HS/HL", "/".join(f"{float(x):.0f}" for x in _h1) + " kN"))
     if _nq == 2:
         if r.get("rv2_kN"):
-            tag_items.append(("Rv wheel 2", f"{r.get('rv2_kN',0):.0f} kN"))
+            tag_items.append(("Rv wheel 2", f"{r.get('rv2_kN',0):g} kN"))
         if r.get("carriage2_mm"):
             tag_items.append(("Carriage 2", f"{r.get('carriage2_mm',0):.0f} mm"))
         if r.get("space_btw_mm"):
@@ -1832,10 +1832,11 @@ def _make_tech_extract_html(r):
         "beam_h": beam_h, "col_h": col_h, "xb_h": xb_h,
         "support_x": support_x, "crane_span": crane_span if crane_span > 0 else rail_gap,
         "is_suspendu": is_susp, "has_columns": bool(col),
-        # Cross beams UNIQUEMENT pour un pont suspendu (les voies y sont
-        # suspendues dessous). En pont posé, les voies reposent directement
-        # sur les colonnes → aucune cross beam transversale.
-        "has_crossbeam": is_susp, "has_brace": has_brace, "has_twin": has_twin,
+        # Cross beams UNIQUEMENT pour un pont suspendu AVEC support Olsen (les
+        # voies y sont suspendues sous les cross beams en tête de colonne). En
+        # pont posé, ou en support Customer (pas de colonnes Olsen), aucune cross
+        # beam transversale n'est dessinée.
+        "has_crossbeam": is_susp and bool(col), "has_brace": has_brace, "has_twin": has_twin,
         "susp_overhang": susp_overhang, "L_xb": L_xb,
         "nbre_pont": nbre_pont, "carriage1": carriage1, "carriage2": carriage2,
         "space_btw": space_btw, "rv1": rv1, "rv2": rv2,
@@ -2567,12 +2568,9 @@ def render_railway_sizing_tab():
     # Toutes les lignes ci-dessous ont 4 colonnes (alignement global)
     # car la ligne "Prix" a 4 colonnes.
 
-    # ── Client / Projet ──────────────────────────────────────────────────────
+    # ── Projet / Client ──────────────────────────────────────────────────────
     hc1, hc2, hc3, hc4 = st.columns(4)
     with hc1:
-        _lcli = "Client ❌" if not client_cur else "Client"
-        client = st.text_input(_lcli, key="rs_client", placeholder="ex : Acme SA")
-    with hc2:
         sale_orders = list(ss.get("sale_orders_ref", {}).keys())
 
         # Au changement de projet :
@@ -2597,6 +2595,9 @@ def render_railway_sizing_tab():
             on_change=_on_project_change,
         )
         project = (project or "").strip()
+    with hc2:
+        _lcli = "Client ❌" if not client_cur else "Client"
+        client = st.text_input(_lcli, key="rs_client", placeholder="ex : Acme SA")
     # hc3, hc4 vides
 
     st.divider()
@@ -2691,7 +2692,7 @@ def render_railway_sizing_tab():
     c5, c6, c7, _c8 = st.columns(4)
     with c5:
         _lrv = "Rv wheel [kN] ❌" if not rv_cur else "Rv wheel [kN]"
-        rv = _ni(_lrv, "rs_rv")
+        rv = _nf_nodef(_lrv, "rs_rv")
     with c6:
         _lcl = "Carriage length [mm] ❌" if not clen_cur else "Carriage length [mm]"
         carriage = _ni_select(_lcl, "rs_clen", CARRIAGE_PRESETS)
@@ -2730,7 +2731,7 @@ def render_railway_sizing_tab():
         c9, c10, c11, _c12 = st.columns(4)
         with c9:
             _lrv2 = "Rv wheel 2 [kN] ❌" if not rv2_cur else "Rv wheel 2 [kN]"
-            rv2 = _ni(_lrv2, "rs_rv2")
+            rv2 = _nf_nodef(_lrv2, "rs_rv2")
         with c10:
             _lcl2 = "Carriage length 2 [mm] ❌" if not clen2_cur else "Carriage length 2 [mm]"
             carriage2 = _ni_select(_lcl2, "rs_clen2", CARRIAGE_PRESETS)

@@ -583,6 +583,51 @@ def fetch_articles_for_project(uid, password, project, db_name, models_url):
         return []
 
 
+def fetch_article_categinfo(uid, password, reference, db_name, models_url):
+    """À partir d'une référence (default_code), retrouve la catégorie Odoo de
+    l'article et en déduit (category, product, type_).
+
+    La catégorie Odoo a un complete_name de la forme
+    « Racine / ABUS / Produit / Type » → on extrait les 3 niveaux utiles, ce qui
+    permet de retrouver les remises ABUS du produit comme en mode création.
+    Retourne ("", "", "") si introuvable.
+    """
+    reference = (reference or "").strip()
+    if not reference:
+        return ("", "", "")
+    models = xmlrpc.client.ServerProxy(models_url)
+    try:
+        pids = models.execute_kw(
+            db_name, uid, password,
+            "product.product", "search",
+            [[("default_code", "=", reference)]],
+            {"limit": 1},
+        )
+        if not pids:
+            return ("", "", "")
+        rec = models.execute_kw(
+            db_name, uid, password,
+            "product.product", "read",
+            [pids], {"fields": ["categ_id"]},
+        )
+        categ = rec[0].get("categ_id")
+        if not categ:
+            return ("", "", "")
+        crec = models.execute_kw(
+            db_name, uid, password,
+            "product.category", "read",
+            [[categ[0]]], {"fields": ["complete_name"]},
+        )
+        levels = (crec[0].get("complete_name") or "").split(" / ")
+        l1 = levels[1] if len(levels) > 1 else ""   # category (ex : ABUS)
+        l2 = levels[2] if len(levels) > 2 else ""   # product
+        l3 = levels[3] if len(levels) > 3 else ""   # type
+        return (l1, l2, l3)
+    except Exception as e:
+        st.warning(f"⚠️ Impossible de lire la catégorie de l'article : {e}")
+        return ("", "", "")
+
+
 def do_update_article(
     db_name, models_url,
     uid, password,
@@ -753,11 +798,23 @@ def render_add_article_tab(db_name, models_url, debug=False):
     discS_cur    = _sv(discS_key)
     delay_cur    = _sv(delay_key)
 
-    # En mode UPDATE, les champs d'article sont masqués et rendus avec une valeur
-    # vide → on neutralise leurs valeurs courantes pour que la validation des
-    # détails achat/vente cible les mêmes clés de widgets (catégorie/produit "").
+    # En mode UPDATE, les champs d'article sont masqués. On retrouve toutefois
+    # category/product/type depuis la catégorie Odoo de l'article référencé,
+    # afin de reproduire le comportement « add » : remises ABUS + purchase desc
+    # auto-remplie. Les clés des widgets achat/vente (pref/margin) sont alignées
+    # sur ces valeurs.
     if update_mode:
-        category_cur = product_cur = type_cur = ""
+        _upd_ref = _sv(f"aa_update_target_{ct}").strip()
+        if _upd_ref:
+            _ci_cache = ss.get("_aa_update_categinfo", {})
+            if _upd_ref not in _ci_cache:
+                _ci_cache[_upd_ref] = fetch_article_categinfo(
+                    ss.uid, ss.password, _upd_ref, db_name, models_url
+                )
+                ss["_aa_update_categinfo"] = _ci_cache
+            category_cur, product_cur, type_cur = _ci_cache[_upd_ref]
+        else:
+            category_cur = product_cur = type_cur = ""
         load_cur = span_cur = ""
 
     product_values_cur = ss.get("category_to_products", {}).get(category_cur, []) if category_cur else []
@@ -810,15 +867,19 @@ def render_add_article_tab(db_name, models_url, debug=False):
         # En mode UPDATE : on affiche UNIQUEMENT la référence de l'article à
         # mettre à jour (saisie libre). Tous les autres champs d'article
         # (Project, Category, Product, Type, Addition, Load, Span) sont masqués.
-
-        # Valeurs neutres pour les champs masqués (utilisées en aval sans effet).
+        # category/product/type sont récupérés (plus haut) depuis la catégorie
+        # Odoo de l'article → remises ABUS + purchase desc auto comme en add.
         project = _sv(project_key)
-        category = ""; product = ""; type_ = ""; addition = ""
+        category = category_cur
+        product  = product_cur
+        type_    = type_cur
+        addition = ""
         load = ""; span = ""
-        product_values = []; type_values = []
-        sid = sabb = None
+        product_values = product_values_cur
+        type_values    = type_values_cur
+        sid, sabb = get_supplier_info(category)
         categ_id = None
-        d1 = d2 = 0
+        d1, d2 = d1_cur, d2_cur
         art_name = art_ref = ""
 
         uc1, _uc2 = st.columns([2, 3])
@@ -832,6 +893,14 @@ def render_add_article_tab(db_name, models_url, debug=False):
                 help="Référence (default_code) de l'article existant à mettre à jour.",
                 key=f"aa_update_target_{ct}",
             ).strip()
+        if update_target_ref and category:
+            st.markdown(
+                f"<div style='margin-top:0.3rem;font-size:0.85rem;color:#888;'>"
+                f"Détecté : <span style='color:#ffcc00;'>{category}"
+                f"{(' · ' + product) if product else ''}"
+                f"{(' · ' + type_) if type_ else ''}</span></div>",
+                unsafe_allow_html=True,
+            )
 
     else:
         col1, col2, col3, col4, col5 = st.columns(5)
@@ -1063,6 +1132,8 @@ def render_add_article_tab(db_name, models_url, debug=False):
     if clear_clicked:
         ss.new_tech_text  = ""
         ss.clear_trigger  = ct + 1
+        ss.pop("_aa_update_articles_cache", None)
+        ss.pop("_aa_update_categinfo", None)
         ss.sale_orders_ref = fetch_sale_orders(ss.uid, ss.password, ss.user_name, db_name, models_url)
         st.rerun()
 
@@ -1101,6 +1172,7 @@ def render_add_article_tab(db_name, models_url, debug=False):
                     ss["_aa_reset_update_toggle"] = True
                     ss["_aa_update_msg"] = msg
                     ss.pop("_aa_update_articles_cache", None)
+                    ss.pop("_aa_update_categinfo", None)
                     st.rerun()
                 else:
                     st.warning(msg)

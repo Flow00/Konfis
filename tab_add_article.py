@@ -772,6 +772,12 @@ def render_add_article_tab(db_name, models_url, debug=False):
 
     update_mode = bool(ss.get("aa_update_mode", False))
 
+    # Détecte la transition ON → OFF du toggle (toggle off manuel OU repassage
+    # auto après update) → on programmera le vidage des prix + délai.
+    if ss.get("_aa_prev_update_mode", False) and not update_mode:
+        ss["_aa_clear_after_update"] = True
+    ss["_aa_prev_update_mode"] = update_mode
+
     def _sv(key, default=""):
         return ss.get(key, default) or default
 

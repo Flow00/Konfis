@@ -787,6 +787,14 @@ def render_add_article_tab(db_name, models_url, debug=False):
     delay_key   = f"aa_delay_{ct}"
     net_key_man = f"aa_net_manual_{ct}"
 
+    # Après un update réussi : on vide les prix (brut, remise spéciale, net
+    # manuel) et le délai. Fait ici, AVANT l'instanciation des widgets, pour
+    # éviter l'erreur Streamlit de modification d'un widget déjà rendu.
+    if ss.get("_aa_clear_after_update"):
+        for _k in (gross_key, discS_key, net_key_man, delay_key):
+            ss[_k] = ""
+        ss["_aa_clear_after_update"] = False
+
     # ── Read current values from session_state for upfront validation ─────────
     project_cur  = _sv(project_key)
     category_cur = _sv(category_key)
@@ -827,6 +835,14 @@ def render_add_article_tab(db_name, models_url, debug=False):
     net_cur     = _sv(net_key_man)
 
     is_olsen_bel = (category_cur == "OLSEN" and ss.get("user_address") == "OLSEN ENGINEERING (BEL)")
+
+    # Pré-remplissage de la marge AVANT la validation (sinon le ❌ apparaît avec
+    # un run de retard : le rendu remplit la marge mais le label a déjà été
+    # calculé sur une marge vide). On aligne la valeur servant à la validation.
+    _margin_default_cur = get_margin_for_product(product_cur)
+    if _margin_default_cur is not None and not is_olsen_bel and not margin_cur:
+        ss[margin_key] = str(int(_margin_default_cur))
+        margin_cur = ss[margin_key]
 
     net_val_cur = compute_net_price(gross_cur, d1_cur, d2_cur, discS_cur) if (gross_cur and validate_float_str(gross_cur)) else 0.0
     net_display_cur = str(net_val_cur) if gross_cur else net_cur
@@ -1080,7 +1096,9 @@ def render_add_article_tab(db_name, models_url, debug=False):
         margin_default = get_margin_for_product(product)
         margin_key = f"aa_margin_{ct}_{product}"
         if margin_default is not None and not is_olsen_bel:
-            if margin_key not in ss:
+            # Auto-remplissage : si le champ est absent OU vide pour ce produit,
+            # on (re)met la marge produit par défaut.
+            if not ss.get(margin_key):
                 ss[margin_key] = str(int(margin_default))
             _lmargin = "Margin [%] ❌" if "marge" in ps_errs else "Margin [%]"
             margin = _int_input(_lmargin, key=margin_key, max_val=100)
@@ -1171,6 +1189,7 @@ def render_add_article_tab(db_name, models_url, debug=False):
                     # et affiche le message de succès après le rerun.
                     ss["_aa_reset_update_toggle"] = True
                     ss["_aa_update_msg"] = msg
+                    ss["_aa_clear_after_update"] = True   # vide prix + délai
                     ss.pop("_aa_update_articles_cache", None)
                     ss.pop("_aa_update_categinfo", None)
                     st.rerun()

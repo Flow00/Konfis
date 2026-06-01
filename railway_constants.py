@@ -233,17 +233,121 @@ IZ_IPE = {
 }
 IZ_TABLES = {"HEA": IZ_HEA, "HEB": IZ_HEB, "IPE": IZ_IPE}
 
+# ═════════════════════════════════════════════════════════════════════════════
+# RENFORT DÉVERSEMENT — Cornières d'aile (LTB reinforcement)
+# ═════════════════════════════════════════════════════════════════════════════
+# Au-delà d'un certain taux de déversement (LTB utilisation), on renforce la
+# poutre du chemin de roulement par des cornières soudées sur le bord de la
+# semelle supérieure. Disposition : aile horizontale dans la continuité de la
+# semelle, aile verticale rabattue vers le bas à l'extrémité extérieure.
+#
+# Le calcul du gain d'inertie utilise le théorème de Huygens (axes parallèles)
+# avec les bras de levier suivants par rapport au centre de gravité du profilé :
+#   d_y = h/2 − e   (cornière au niveau de la semelle → axe fort)
+#   d_z = b/2 + e   (cornière débordant vers l'extérieur → axe faible)
+# où e = distance du CdG de la cornière à son talon (heel).
+#
+# Catalogue (escalade des tailles) : chaque entrée est un tuple
+#   (label, A_cm², I₀_cm⁴, e_cm, masse_kg/m)
+# Valeurs issues des tables de profilés à ailes égales (NF EN 10056-1).
+
+ANGLE_CATALOGUE = [
+    # (label,       A_cm², I₀_cm⁴, e_cm, masse_kg/m)
+    ("50×50×5",      4.75,   11.3,  1.43,  3.73),
+    ("70×70×7",      9.31,   43.2,  2.01,  7.31),
+    ("100×100×10",  19.00,  180.0,  2.87, 14.92),
+    ("150×150×10",  29.00,  637.2,  4.12, 22.77),
+]
+
+# Seuil de déclenchement du renfort par cornières [-] :
+#   Si l'utilisation LTB de base (M_max / M_Rd sans cornières) dépasse cette
+#   valeur, on tente d'ajouter des cornières (escalade dans le catalogue
+#   jusqu'à ce que l'utilisation tombe ≤ 1,0). Au-dessus de 0,85 on garde une
+#   marge avant la ruine — valeur cohérente avec une pratique conservatrice.
+LTB_REINFORCE_THRESHOLD = 0.85
+
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  REINFORCEMENT ANGLES — LTB strengthening cornières (equal-leg L a×a×t, S235)
-#  Welded on the TOP flange (one each side) to raise Iy AND Iz and improve the
-#  lateral-torsional buckling resistance of the runway beam.
-#  (label, A_cm2, I_own_cm4, e_cm, mass_kg/m)
+# MAIN-D'ŒUVRE (MO) — Heures de fabrication / montage par poste
 # ═════════════════════════════════════════════════════════════════════════════
-ANGLE_CATALOGUE = [
-    ("50×50×5",     4.75,   11.3, 1.43,  3.73),
-    ("70×70×7",     9.31,   43.2, 2.01,  7.31),
-    ("100×100×10", 19.00,  180.0, 2.87, 14.92),
-    ("150×150×10", 29.00,  637.2, 4.12, 22.77),
-]
-LTB_REINFORCE_THRESHOLD = 0.85
+# Le coût MO est calculé poste par poste (CR, colonnes, cross beam) à partir
+# d'un ratio horaire × prix MO. Les ratios viennent du retour d'expérience
+# atelier et restent ajustables ici.
+#
+# ATTENTION — TAUX EN m/h EN SÉRIE :
+# Pour un poste qui passe successivement par 2 opérations (soudure puis
+# peinture), les TAUX (m/h) ne s'additionnent PAS : ce sont les TEMPS qui
+# s'additionnent. La formule correcte pour 1 mètre est :
+#   h_total = (1 / m_per_h_atelier) + (1 / m_per_h_peinture)   [en h/m]
+# Les deux taux sont donc stockés séparément, et le calcul fait la somme
+# des temps côté code (jamais la somme des taux).
+
+# Prix MO par défaut [€/h] — utilisé si l'utilisateur ne saisit pas de valeur.
+DEFAULT_MO_PRICE = 45.0
+
+# ── CR (chemin de roulement) ────────────────────────────────────────────────
+# CAS POSÉ : taux de production séparés ATELIER (débit, soudure, assemblage)
+# et PEINTURE. La formule additionne les TEMPS, pas les taux. Le ×2 vient
+# des 2 voies de CR (2 poutres parallèles).
+#   h_MO_CR_pose = ( L_m/MO_M_PER_HOUR_BEAM_WELD
+#                  + L_m/MO_M_PER_HOUR_BEAM_PAINT ) × 2
+MO_M_PER_HOUR_BEAM_WELD  = 1.75     # [m/h] — atelier (débit + soudure + assemblage)
+MO_M_PER_HOUR_BEAM_PAINT = 3    # [m/h] — peinture
+
+# CAS SUSPENDU : pas de rails, on compte par appui.
+#   h_MO_CR_susp = MO_HOURS_PER_SUPPORT_SUSP × n_appuis_total
+MO_HOURS_PER_SUPPORT_SUSP = 1.5    # [h / appui] — CR suspendu
+
+# RENFORT CORNIÈRES (déversement) : si des cornières sont posées sur le CR,
+# on ajoute leur propre temps de fabrication. Même décomposition atelier +
+# peinture, ×2 voies (2 cornières par poutre, 2 poutres).
+#   h_MO_corn = ( L_m/MO_M_PER_HOUR_ANGLE_WELD
+#               + L_m/MO_M_PER_HOUR_ANGLE_PAINT ) × 2   (si ltb_reinforced)
+MO_M_PER_HOUR_ANGLE_WELD  = 1.75    # [m/h] — atelier cornières
+MO_M_PER_HOUR_ANGLE_PAINT = 12   # [m/h] — peinture cornières
+
+# ── Colonnes Olsen ──────────────────────────────────────────────────────────
+# Heures par colonne, somme atelier + peinture
+#   h_MO_col = n_cols_total × MO_HOURS_PER_COLUMN
+MO_HOURS_PER_COLUMN = 3.25 + 2.5    # [h / colonne] = atelier + peinture = 5 h
+
+# Bracing (contreventement) : FORFAIT FIXE ajouté UNE FOIS si la configuration
+# de colonne est "Bracing", quel que soit le nombre de portiques contreventés.
+#   h_MO_bracing = MO_HOURS_BRACING_PER_COL   (seulement si config = "Bracing")
+# Le suffixe "_PER_COL" du nom est historique — c'est bien un forfait global.
+MO_HOURS_BRACING_PER_COL = 3.0     # [h] — forfait config Bracing
+
+# Configuration double colonne (Twin column) : FORFAIT FIXE ajouté UNE FOIS
+# en plus des heures de base n_cols × MO_HOURS_PER_COLUMN.
+#   h_MO_double = MO_HOURS_DOUBLE_COL   (seulement si config = "Twin column")
+MO_HOURS_DOUBLE_COL = 1.5 * MO_HOURS_PER_COLUMN  # [h] — forfait double (= 7,5 h)
+
+# ── Cross beam ──────────────────────────────────────────────────────────────
+# Cross beam (poutre de suspension du portique Olsen, suspendu) : heures
+# par cross beam (somme atelier + peinture, valide car en h/unité).
+#   h_MO_xb = n_beams × MO_HOURS_PER_CROSS_BEAM
+MO_HOURS_PER_CROSS_BEAM = 2.5 + 2.0  # [h / cross beam] = atelier + peinture = 4,5 h
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LIMITES MAX SAISIES — Garde-fous dimensionnels
+# ═════════════════════════════════════════════════════════════════════════════
+# Bornes hautes appliquées à certaines saisies utilisateur. Au-delà, le calcul
+# est bloqué avec un message clair. Ce ne sont pas des limites mécaniques
+# absolues : ce sont des limites pragmatiques (au-delà, on sort du domaine de
+# validité raisonnable du module). Ajuster ici si le besoin évolue.
+
+# Portée du pont entre rails [mm] — différenciée posé / suspendu.
+# Un pont suspendu encaisse moins de portée libre (cross beam moins
+# performante en flexion latérale et limite atelier de transport).
+MAX_CRANE_SPAN_MM_POSE     = 39000.0   # [mm] — pont posé
+MAX_CRANE_SPAN_MM_SUSPENDU = 25000.0   # [mm] — pont suspendu
+
+# Entraxe entre appuis (span d'une portée du chemin de roulement) [mm].
+# Au-delà, la flèche L/600 devient critique et impose des sections atypiques.
+MAX_SUPPORT_SPACING_MM     = 12000.0   # [mm]
+
+# Hauteur sous CR (rail height) [mm] — hauteur totale depuis le sol jusqu'au
+# dessus du rail (posé) ou jusqu'à l'axe du CR (suspendu). Au-delà, la
+# colonne devient très élancée et le flambement domine fortement.
+MAX_RAIL_HEIGHT_MM         = 8000.0    # [mm]

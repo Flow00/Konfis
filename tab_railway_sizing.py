@@ -3311,7 +3311,32 @@ def render_railway_sizing_tab():
         # Export PDF + Extrait technique client (3D) — boutons côte à côte
         st.divider()
         st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
-        acol, tcol, ecol, _ = st.columns([1, 1, 1, 1])
+        # CSS pour le bouton "To Add articles" — injecté avant les colonnes
+        # pour ne pas créer de décalage vertical à l'intérieur de la colonne
+        # (sinon le bouton se retrouve plus bas que ses voisins).
+        st.markdown("""
+        <style>
+          .st-key-rs_to_add_article button {
+              background-color: #FDAE1B !important;
+              color: #0A1E32 !important;
+              border: 1px solid #FDAE1B !important;
+              font-weight: 600 !important;
+          }
+          .st-key-rs_to_add_article button:hover {
+              background-color: #e69b14 !important;
+              border-color: #e69b14 !important;
+              color: #0A1E32 !important;
+          }
+          .st-key-rs_to_add_article button:focus,
+          .st-key-rs_to_add_article button:active {
+              background-color: #e69b14 !important;
+              border-color: #e69b14 !important;
+              color: #0A1E32 !important;
+              box-shadow: none !important;
+          }
+        </style>
+        """, unsafe_allow_html=True)
+        acol, _, tcol, ecol = st.columns([1, 1, 1, 1])
         with acol:
             try:
                 # Masse totale = tout ce qui est en kg (CR + rail + lasercut CR
@@ -3338,31 +3363,6 @@ def render_railway_sizing_tab():
                 addition_lbl = "Suspendu" if r.get("is_suspendu") else "Posé"
                 project_lbl  = r.get("project") or ""
 
-                # CSS pour le bouton "To Add articles" — sélecteur officiel
-                # Streamlit : st.button(key="X") génère un wrapper avec la
-                # classe ".st-key-X" (depuis Streamlit 1.28).
-                st.markdown("""
-                <style>
-                  .st-key-rs_to_add_article button {
-                      background-color: #FDAE1B !important;
-                      color: #0A1E32 !important;
-                      border: 1px solid #FDAE1B !important;
-                      font-weight: 600 !important;
-                  }
-                  .st-key-rs_to_add_article button:hover {
-                      background-color: #e69b14 !important;
-                      border-color: #e69b14 !important;
-                      color: #0A1E32 !important;
-                  }
-                  .st-key-rs_to_add_article button:focus,
-                  .st-key-rs_to_add_article button:active {
-                      background-color: #e69b14 !important;
-                      border-color: #e69b14 !important;
-                      color: #0A1E32 !important;
-                      box-shadow: none !important;
-                  }
-                </style>
-                """, unsafe_allow_html=True)
                 if st.button("➕ To Add articles", use_container_width=True,
                              type="primary",
                              key="rs_to_add_article",

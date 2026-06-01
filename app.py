@@ -335,8 +335,8 @@ else:
     with tab2:
         render_railway_sizing_tab()
     with tab3:
-        #st.markdown("## 📊 Sales automation")
-        #st.info("🚧 Coming soon …")
-        render_sales_automation_tab(db_name, models_url)
+        st.markdown("## 📊 Sales automation")
+        st.info("🚧 Coming soon …")
+        #render_sales_automation_tab(db_name, models_url)
 
 _render_footer()

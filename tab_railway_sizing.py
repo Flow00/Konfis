@@ -5,7 +5,12 @@ from datetime import date
 
 from railway_constants import (
     DEFAULT_STEEL_PRICE, DEFAULT_RAIL_PRICE,
-    DEFAULT_LASERCUT_PRICE, DEFAULT_PAINT_PRICE,
+    DEFAULT_LASERCUT_PRICE, DEFAULT_PAINT_PRICE, DEFAULT_MO_PRICE,
+    MO_M_PER_HOUR_BEAM_WELD, MO_M_PER_HOUR_BEAM_PAINT,
+    MO_M_PER_HOUR_ANGLE_WELD, MO_M_PER_HOUR_ANGLE_PAINT,
+    MO_HOURS_PER_SUPPORT_SUSP,
+    MO_HOURS_PER_COLUMN, MO_HOURS_BRACING_PER_COL,
+    MO_HOURS_DOUBLE_COL, MO_HOURS_PER_CROSS_BEAM,
     PRICE_BOULONNERIE_UNIT,
     FACT_ADD, FACT_DECOUPE,
     DEFLECTION_RATIO, YOUNG_MODULUS_MPA,
@@ -25,6 +30,8 @@ from railway_constants import (
     EMBASE_TF_THIN, EMBASE_TF_THICK, TF_THIN_LIMIT, TF_THICK_LIMIT,
     EMBASE_OVERHANG, TF_PLAQUE_SUP_CAP, HORIZ_SCAN_POINTS,
     ANGLE_CATALOGUE, LTB_REINFORCE_THRESHOLD,
+    MAX_CRANE_SPAN_MM_POSE, MAX_CRANE_SPAN_MM_SUSPENDU,
+    MAX_SUPPORT_SPACING_MM, MAX_RAIL_HEIGHT_MM,
 )
 
 ss = st.session_state
@@ -823,6 +830,7 @@ def compute_columns(
     entraxe_col_mm=6000,      # entraxe entre colonnes [mm]
     is_suspendu=False,        # bool — pont suspendu
     h_cross_beam_mm=0.0,      # hauteur section cross beam [mm] (suspendu)
+    mo_price=DEFAULT_MO_PRICE,
 ):
     """
     Dimensionne la colonne et retourne un dict complet.
@@ -966,7 +974,8 @@ def compute_columns(
 CROSS_BEAM_OVERHANG = 500.0   # mm de chaque côté (poutre de suspension)
 
 def compute_cross_beam(col_type, crane_span_mm, R_max_kN, n_appuis_total,
-                       steel_price, lasercut_price, paint_price):
+                       steel_price, lasercut_price, paint_price,
+                       mo_price=DEFAULT_MO_PRICE):
     """
     Dimensionne la cross beam et retourne un dict complet (masses, coûts),
     ou None si crane_span ≤ 0 ou aucune section ne convient.
@@ -1039,6 +1048,9 @@ def compute_cross_beam(col_type, crane_span_mm, R_max_kN, n_appuis_total,
 
     # ── Boulonnerie : forfait n_appuis × visserie CR ─────────────────────────
     boul = int(n_appuis_total) * PRICE_BOULONNERIE_UNIT
+    # ── MO cross beam : heures + coût ────────────────────────────────────────
+    h_mo_xb   = n_beams * MO_HOURS_PER_CROSS_BEAM
+    cout_mo_xb = h_mo_xb * float(mo_price)
 
     return {
         "beam_label":  beam_label,
@@ -1066,7 +1078,9 @@ def compute_cross_beam(col_type, crane_span_mm, R_max_kN, n_appuis_total,
         "peinture":    round(peinture, 1),
         "d_paint":     round(d_cost),
         "boul":        boul,
-        "cout_cross":  round(a_cost + c_cost + d_cost + boul),
+        "h_mo_xb":     round(h_mo_xb, 1),
+        "cout_mo_xb":  round(cout_mo_xb),
+        "cout_cross":  round(a_cost + c_cost + d_cost + boul + cout_mo_xb),
     }
 
 
@@ -1076,7 +1090,8 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
                     appui_type, spacing_appuis_mm,
                     steel_price, rail_price, lasercut_price, paint_price,
                     nbre_appuis=2,
-                    crane_type="Posé", crane_span_mm=0.0):
+                    crane_type="Posé", crane_span_mm=0.0,
+                    mo_price=DEFAULT_MO_PRICE):
     L      = float(total_length_mm)
     spa    = float(spacing_appuis_mm)
     is_suspendu = (str(crane_type) == "Suspendu")
@@ -1177,7 +1192,21 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
     b_cost = m2 * float(rail_price)
     c_cost = m3 * float(lasercut_price)
     d_cost = peinture * float(paint_price)
-    cout_mat = a_cost + b_cost + c_cost + d_cost + cout_boulonnerie
+    # ── MO CR ────────────────────────────────────────────────────────────────
+    # Posé    : (L_m/atelier + L_m/peinture) × 2 voies
+    # Suspendu: 1,5 × n_appuis (forfait)
+    # Cornières : même décomposition (atelier + peinture) × 2 voies
+    L_m = (L / 1000.0)
+    if is_suspendu:
+        h_mo_cr = MO_HOURS_PER_SUPPORT_SUSP * float(n_appuis)
+    else:
+        h_mo_cr = (L_m / MO_M_PER_HOUR_BEAM_WELD
+                 + L_m / MO_M_PER_HOUR_BEAM_PAINT) * 2.0
+    if reinf["angle"]:
+        h_mo_cr += (L_m / MO_M_PER_HOUR_ANGLE_WELD
+                  + L_m / MO_M_PER_HOUR_ANGLE_PAINT) * 2.0
+    cout_mo_cr = h_mo_cr * float(mo_price)
+    cout_mat  = a_cost + b_cost + c_cost + d_cost + cout_boulonnerie + cout_mo_cr
 
     return {
         "beam_label": beam_label,
@@ -1207,6 +1236,8 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
         "m3":round(m3),"c":round(c_cost),
         "peinture":round(peinture,1),"d":round(d_cost),
         "n_appuis":n_appuis,"cout_boulonnerie":cout_boulonnerie,
+        "h_mo_cr": round(h_mo_cr, 1),
+        "cout_mo_cr": round(cout_mo_cr),
         "cout_mat":round(cout_mat),
         "rail_label":rail_label,
         "rail_short": _short_rail(rail_label),
@@ -1227,7 +1258,8 @@ def compute_railway(client, project, username, total_length_mm, beam_type, rail_
     }
 
 
-def _recompute_costs(r, steel_price, rail_price, lasercut_price, paint_price):
+def _recompute_costs(r, steel_price, rail_price, lasercut_price, paint_price,
+                     mo_price=DEFAULT_MO_PRICE):
     """
     Recalcule UNIQUEMENT les coûts dans un résultat existant, sans toucher
     aux masses, à la poutre choisie, à la flèche, au moment, etc.
@@ -1252,19 +1284,36 @@ def _recompute_costs(r, steel_price, rail_price, lasercut_price, paint_price):
     b_cost = m2 * float(rail_price)
     c_cost = m3 * float(lasercut_price)
     d_cost = peinture * float(paint_price)
-    cout_mat = a_cost + b_cost + c_cost + d_cost + cout_boulonnerie
+    # MO CR : même logique que compute_railway (posé/suspendu + ×2 voies +
+    # bonus cornières si renfort déversement).
+    L_mm = float(r.get("total_length_mm", 0))
+    L_m  = (L_mm / 1000.0)
+    n_app = float(r.get("n_appuis", 2))
+    if r.get("is_suspendu"):
+        h_mo_cr = MO_HOURS_PER_SUPPORT_SUSP * n_app
+    else:
+        h_mo_cr = (L_m / MO_M_PER_HOUR_BEAM_WELD
+                 + L_m / MO_M_PER_HOUR_BEAM_PAINT) * 2.0
+    if r.get("ltb_reinforced"):
+        h_mo_cr += (L_m / MO_M_PER_HOUR_ANGLE_WELD
+                  + L_m / MO_M_PER_HOUR_ANGLE_PAINT) * 2.0
+    cout_mo_cr = h_mo_cr * float(mo_price)
+    cout_mat = a_cost + b_cost + c_cost + d_cost + cout_boulonnerie + cout_mo_cr
 
     # Mettre à jour les clés de coûts dans le résultat
     r["a"] = round(a_cost)
     r["b"] = round(b_cost)
     r["c"] = round(c_cost)
     r["d"] = round(d_cost)
+    r["h_mo_cr"]   = round(h_mo_cr, 1)
+    r["cout_mo_cr"] = round(cout_mo_cr)
     r["cout_mat"] = round(cout_mat)
     # Mémoriser les prix utilisés (pour le résumé PDF)
     r["price_steel"]    = float(steel_price)
     r["price_rail"]     = float(rail_price)
     r["price_lasercut"] = float(lasercut_price)
     r["price_paint"]    = float(paint_price)
+    r["price_mo"]       = float(mo_price)
     return r
 
 
@@ -1470,7 +1519,7 @@ def _make_pdf_bytes(r):
     _nq = int(r.get("crane_qty", r.get("nbre_pont", 1)) or 1)
     tag_items.append(("Cranes", f"{_nq}"))
     if r.get("rv_kN"):
-        tag_items.append(("Rv wheel", f"{r.get('rv_kN',0):g} kN"))
+        tag_items.append(("Rv wheel", f"{r.get('rv_kN',0):.0f} kN"))
     if r.get("carriage_mm"):
         tag_items.append(("Carriage", f"{r.get('carriage_mm',0):.0f} mm"))
     if r.get("appui_type") == "Olsen":
@@ -1479,7 +1528,7 @@ def _make_pdf_bytes(r):
             tag_items.append(("HT3/HS/HL", "/".join(f"{float(x):.0f}" for x in _h1) + " kN"))
     if _nq == 2:
         if r.get("rv2_kN"):
-            tag_items.append(("Rv wheel 2", f"{r.get('rv2_kN',0):g} kN"))
+            tag_items.append(("Rv wheel 2", f"{r.get('rv2_kN',0):.0f} kN"))
         if r.get("carriage2_mm"):
             tag_items.append(("Carriage 2", f"{r.get('carriage2_mm',0):.0f} mm"))
         if r.get("space_btw_mm"):
@@ -1541,6 +1590,7 @@ def _make_pdf_bytes(r):
         ["Lasercut mass",   f"{r['m3']} kg",  f"{r['c']} €"],
         ["Paint",       f"{r['peinture']} L", f"{r['d']} €"],
         ["Bolts",    f"{r['n_appuis']} braces", f"{r['cout_boulonnerie']} €"],
+        ["MO",       f"{r.get('h_mo_cr',0)} h",  f"{r.get('cout_mo_cr',0)} €"],
         ["TOTAL", "", f"{r['cout_mat']} €"],
     ]
     tbl = Table(rows, colWidths=[80*mm, 50*mm, 40*mm])
@@ -1606,6 +1656,7 @@ def _make_pdf_bytes(r):
             ["Lasercut col.",f"{col.get('m_div_col',0)} kg",       f"{col.get('c_col',0)} €"],
             ["Paint col.",    f"{col.get('peinture_col',0)} L",     f"{col.get('d_col',0)} €"],
             ["Bolts col.", f"{col.get('n_cols_total',0)} col.",  f"{col.get('boul_col',0)} €"],
+            ["MO col.",    f"{col.get('h_mo_col',0)} h",          f"{col.get('cout_mo_col',0)} €"],
             ["TOTAL columns",     "",                                    f"{col.get('cout_col',0)} €"],
         ]
         col_tbl = Table(col_rows, colWidths=[80*mm, 50*mm, 40*mm])
@@ -1657,6 +1708,7 @@ def _make_pdf_bytes(r):
                 ["Lasercut",        f"{_xb.get('m_div',0)} kg",           f"{_xb.get('c_div',0)} €"],
                 ["Paint",           f"{_xb.get('peinture',0)} L",         f"{_xb.get('d_paint',0)} €"],
                 ["Bolts",           f"{r.get('n_appuis',0)} braces",      f"{_xb.get('boul',0)} €"],
+                ["MO",              f"{_xb.get('h_mo_xb',0)} h",          f"{_xb.get('cout_mo_xb',0)} €"],
                 ["TOTAL cross beam", "",                                  f"{_xb.get('cout_cross',0)} €"],
             ]
             xb_tbl = Table(xb_rows, colWidths=[80*mm, 50*mm, 40*mm])
@@ -1691,11 +1743,13 @@ def _make_pdf_bytes(r):
         _xb_c2   = _xb.get("c_div", 0)   if _xb_ok2 else 0
         _xb_d2   = _xb.get("d_paint", 0) if _xb_ok2 else 0
         _xb_b2   = _xb.get("boul", 0)    if _xb_ok2 else 0
+        _xb_mo2  = _xb.get("cout_mo_xb",0) if _xb_ok2 else 0
         _steel_tot   = r.get("a",0) + r.get("b",0) + col.get("a_col",0) + _xb_a2
         _div_tot     = r.get("c",0) + col.get("c_col",0) + _xb_c2
         _peinture_tot= r.get("d",0) + col.get("d_col",0) + _xb_d2
         _boul_tot    = r.get("cout_boulonnerie",0) + col.get("boul_col",0) + _xb_b2
-        _grand       = _steel_tot + _div_tot + _peinture_tot + _boul_tot
+        _mo_tot      = r.get("cout_mo_cr",0) + col.get("cout_mo_col",0) + _xb_mo2
+        _grand       = _steel_tot + _div_tot + _peinture_tot + _boul_tot + _mo_tot
 
         res_rows = [
             ["Poste", "Cost"],
@@ -1703,6 +1757,7 @@ def _make_pdf_bytes(r):
             ["Lasercut", f"{_div_tot} €"],
             ["Paint",    f"{_peinture_tot} €"],
             ["Bolts",    f"{_boul_tot} €"],
+            ["MO",       f"{_mo_tot} €"],
             ["GRAND TOTAL",   f"{_grand} €"],
         ]
         res_tbl = Table(res_rows, colWidths=[110*mm, 60*mm])
@@ -1832,11 +1887,10 @@ def _make_tech_extract_html(r):
         "beam_h": beam_h, "col_h": col_h, "xb_h": xb_h,
         "support_x": support_x, "crane_span": crane_span if crane_span > 0 else rail_gap,
         "is_suspendu": is_susp, "has_columns": bool(col),
-        # Cross beams UNIQUEMENT pour un pont suspendu AVEC support Olsen (les
-        # voies y sont suspendues sous les cross beams en tête de colonne). En
-        # pont posé, ou en support Customer (pas de colonnes Olsen), aucune cross
-        # beam transversale n'est dessinée.
-        "has_crossbeam": is_susp and bool(col), "has_brace": has_brace, "has_twin": has_twin,
+        # Cross beams UNIQUEMENT pour un pont suspendu (les voies y sont
+        # suspendues dessous). En pont posé, les voies reposent directement
+        # sur les colonnes → aucune cross beam transversale.
+        "has_crossbeam": is_susp, "has_brace": has_brace, "has_twin": has_twin,
         "susp_overhang": susp_overhang, "L_xb": L_xb,
         "nbre_pont": nbre_pont, "carriage1": carriage1, "carriage2": carriage2,
         "space_btw": space_btw, "rv1": rv1, "rv2": rv2,
@@ -2205,7 +2259,7 @@ function build(){
   const yColTop = hR - (GEO.is_suspendu ? 0 : railH);
   // Axe des voies de roulement
   const yAxis = GEO.has_crossbeam
-      ? (yColTop - xh - bh/2 - GEO.beam_h*0.6)  // suspendu : CR suspendu sous la cross beam
+      ? (yColTop - xh - bh/2)           // suspendu : CR plaquée sous la cross beam
       : (yColTop - bh/2);               // posé : CR posée sur la tête de colonne
   const yXBaxis = yColTop - xh/2;       // axe cross beam (suspendu uniquement)
   // Hauteur des colonnes :
@@ -2238,15 +2292,7 @@ function build(){
     // des colonnes) pour un rendu plus propre.
     if(GEO.has_crossbeam){
       root.add(ibeam(Math.max(gap - ch, gap*0.5), xh, 'z', x, yXBaxis, 0, C_XB));
-      // Suspentes : du BAS de la cross beam jusqu'au DESSUS du CR (jonction
-      // franche, sans écart visible).
-      [zRunL,zRunR].forEach(z=>{
-        const yXBbot = yXBaxis - xh/2;     // bas de la cross beam
-        const yCRtop = yAxis + bh/2;       // dessus du CR
-        const hHang  = Math.max(yXBbot - yCRtop, 1);
-        const hang=box(ch*0.22, hHang, ch*0.22, C_XB);
-        hang.position.set(x, (yXBbot + yCRtop)/2, z); root.add(hang);
-      });
+      // CR plaquée directement contre le bas de la cross beam → pas de suspente.
     }
   });
 
@@ -2531,7 +2577,7 @@ def render_railway_sizing_tab():
         "rs_HT3", "rs_HS", "rs_HL",
         "rs_HT3_2", "rs_HS_2", "rs_HL_2",
     ]
-    _price_keys = ["rs_sp", "rs_rp", "rs_lcp", "rs_pp"]
+    _price_keys = ["rs_sp", "rs_rp", "rs_lcp", "rs_pp", "rs_mop"]
 
     _struct_signature = tuple(str(ss.get(k, "")) for k in _structural_keys)
     _price_signature  = tuple(str(ss.get(k, "")) for k in _price_keys)
@@ -2562,13 +2608,14 @@ def render_railway_sizing_tab():
                 rail_price     = _safe(ss.get("rs_rp"),  DEFAULT_RAIL_PRICE),
                 lasercut_price = _safe(ss.get("rs_lcp"), DEFAULT_LASERCUT_PRICE),
                 paint_price    = _safe(ss.get("rs_pp"),  DEFAULT_PAINT_PRICE),
+                mo_price       = _safe(ss.get("rs_mop"), DEFAULT_MO_PRICE),
             )
             ss["_rs_price_signature"] = _price_signature
 
     # Toutes les lignes ci-dessous ont 4 colonnes (alignement global)
     # car la ligne "Prix" a 4 colonnes.
 
-    # ── Projet / Client ──────────────────────────────────────────────────────
+    # ── Project / Client ─────────────────────────────────────────────────────
     hc1, hc2, hc3, hc4 = st.columns(4)
     with hc1:
         sale_orders = list(ss.get("sale_orders_ref", {}).keys())
@@ -2692,7 +2739,7 @@ def render_railway_sizing_tab():
     c5, c6, c7, _c8 = st.columns(4)
     with c5:
         _lrv = "Rv wheel [kN] ❌" if not rv_cur else "Rv wheel [kN]"
-        rv = _nf_nodef(_lrv, "rs_rv")
+        rv = _ni(_lrv, "rs_rv")
     with c6:
         _lcl = "Carriage length [mm] ❌" if not clen_cur else "Carriage length [mm]"
         carriage = _ni_select(_lcl, "rs_clen", CARRIAGE_PRESETS)
@@ -2731,7 +2778,7 @@ def render_railway_sizing_tab():
         c9, c10, c11, _c12 = st.columns(4)
         with c9:
             _lrv2 = "Rv wheel 2 [kN] ❌" if not rv2_cur else "Rv wheel 2 [kN]"
-            rv2 = _nf_nodef(_lrv2, "rs_rv2")
+            rv2 = _ni(_lrv2, "rs_rv2")
         with c10:
             _lcl2 = "Carriage length 2 [mm] ❌" if not clen2_cur else "Carriage length 2 [mm]"
             carriage2 = _ni_select(_lcl2, "rs_clen2", CARRIAGE_PRESETS)
@@ -2742,14 +2789,20 @@ def render_railway_sizing_tab():
         # ── Charges horizontales pont 2 (si Olsen) ───────────────────────────
         if appui_type == "Olsen":
             h21, h22, h23, _h24 = st.columns(4)
-            with h21: HT3_2 = _nf_nodef("HT3 trolley accel. 2 [kN]", "rs_HT3_2")
-            with h22: HS_2  = _nf_nodef("HS skewing 2 [kN]",   "rs_HS_2")
-            with h23: HL_2  = _nf_nodef("HL bridge accel. 2 [kN]",      "rs_HL_2")
+            with h21:
+                _lHT3_2 = "HT3 trolley accel. 2 [kN] ❌" if not ss.get("rs_HT3_2","") else "HT3 trolley accel. 2 [kN]"
+                HT3_2 = _nf_nodef(_lHT3_2, "rs_HT3_2")
+            with h22:
+                _lHS_2 = "HS skewing 2 [kN] ❌" if not ss.get("rs_HS_2","") else "HS skewing 2 [kN]"
+                HS_2  = _nf_nodef(_lHS_2, "rs_HS_2")
+            with h23:
+                _lHL_2 = "HL bridge accel. 2 [kN] ❌" if not ss.get("rs_HL_2","") else "HL bridge accel. 2 [kN]"
+                HL_2  = _nf_nodef(_lHL_2, "rs_HL_2")
 
     st.divider()
     st.markdown("<div style='margin-top:0.5rem'></div>", unsafe_allow_html=True)
     st.markdown("### 💰 Costs")
-    p1, p2, p3, p4 = st.columns(4)
+    p1, p2, p3, p4, p5 = st.columns(5)
     with p1:
         _lsp = "Steel price [€/kg] ❌" if not sp_cur else "Steel price [€/kg]"
         steel_p = _nf(_lsp, "rs_sp", DEFAULT_STEEL_PRICE)
@@ -2762,6 +2815,10 @@ def render_railway_sizing_tab():
     with p4:
         _lpp = "Paint price [€/L] ❌" if not pp_cur else "Paint price [€/L]"
         paint_p = _nf(_lpp, "rs_pp", DEFAULT_PAINT_PRICE)
+    with p5:
+        _mop_cur = ss.get("rs_mop","")
+        _lmop = "MO price [€/h] ❌" if not _mop_cur else "MO price [€/h]"
+        mo_p = _nf(_lmop, "rs_mop", DEFAULT_MO_PRICE)
 
     # ── Bouton Calculer (droite) ─────────────────────────────────────────────
     st.markdown("<div style='margin-top:2.0rem'></div>", unsafe_allow_html=True)
@@ -2783,16 +2840,44 @@ def render_railway_sizing_tab():
         if not is_suspendu and not _safe(rail_p):   errs.append("Rail price requis")
         if not _safe(lasercut_p):                   errs.append("Lasercut price requis")
         if not _safe(paint_p):                      errs.append("Paint price requis")
+        if not _safe(mo_p):                         errs.append("MO price requis")
         # Crane span (portée du pont entre rails) : toujours obligatoire — sert
         # au dimensionnement (cross beam en suspendu) et au rendu 3D du pont.
         if not _safe(crane_span):
-            errs.append(
-                "Crane span requis"
-            )
-
-        # Cohérence dimensionnelle : entraxe appuis (= span) ≤ longueur totale
+            errs.append("Crane span requis")
+        # Précalcul des dimensions courantes (utilisé pour limites + cohérence)
         _tl = _safe(total_length)
         _s  = _safe(support_spacing)
+        # Limites max (valeurs dans railway_constants.py — ajustables là)
+        _cs = _safe(crane_span)
+        _cs_max = MAX_CRANE_SPAN_MM_SUSPENDU if is_suspendu else MAX_CRANE_SPAN_MM_POSE
+        if _cs and _cs > _cs_max:
+            errs.append(
+                f"Crane span trop grand : {_cs:.0f} mm > {_cs_max:.0f} mm "
+                f"(limite {'suspendu' if is_suspendu else 'posé'})"
+            )
+        if _s and _s > MAX_SUPPORT_SPACING_MM:
+            errs.append(
+                f"Support spacing trop grand : {_s:.0f} mm > "
+                f"{MAX_SUPPORT_SPACING_MM:.0f} mm"
+            )
+        _rh = _safe(rail_height)
+        if _rh and _rh > MAX_RAIL_HEIGHT_MM:
+            errs.append(
+                f"Rail height trop grande : {_rh:.0f} mm > "
+                f"{MAX_RAIL_HEIGHT_MM:.0f} mm"
+            )
+        # HT3/HS/HL : obligatoires pour chaque pont quand colonnes Olsen
+        if appui_type == "Olsen":
+            if not _safe(HT3): errs.append("HT3 trolley accel. requis")
+            if not _safe(HS):  errs.append("HS skewing requis")
+            if not _safe(HL):  errs.append("HL bridge accel. requis")
+            if crane_qty == 2:
+                if not _safe(HT3_2): errs.append("HT3 trolley accel. 2 requis")
+                if not _safe(HS_2):  errs.append("HS skewing 2 requis")
+                if not _safe(HL_2):  errs.append("HL bridge accel. 2 requis")
+
+        # Cohérence dimensionnelle : entraxe appuis (= span) ≤ longueur totale
         if _tl and _s and _s > _tl:
             errs.append(
                 f"Entraxe appuis ({_s:.0f} mm) > Total Length ({_tl:.0f} mm) : "
@@ -2826,6 +2911,7 @@ def render_railway_sizing_tab():
                 nbre_appuis=int(nbre_appuis),
                 crane_type=crane_type,
                 crane_span_mm=_safe(crane_span),
+                mo_price=_safe(mo_p, DEFAULT_MO_PRICE),
             )
             # ── Stocker TOUS les inputs dans le résultat (résumé PDF complet) ──
             if _res is not None:
@@ -2844,6 +2930,7 @@ def render_railway_sizing_tab():
                 _res["price_rail"]     = _safe(rail_p,     DEFAULT_RAIL_PRICE)
                 _res["price_lasercut"] = _safe(lasercut_p, DEFAULT_LASERCUT_PRICE)
                 _res["price_paint"]    = _safe(paint_p,    DEFAULT_PAINT_PRICE)
+                _res["price_mo"]       = _safe(mo_p,       DEFAULT_MO_PRICE)
             # ── Calcul colonnes Olsen ─────────────────────────────────────────
             if appui_type == "Olsen":
                 if not _safe(rail_height):
@@ -2888,6 +2975,7 @@ def render_railway_sizing_tab():
                         steel_price     = _sp,
                         lasercut_price  = _lcp,
                         paint_price     = _pp,
+                        mo_price        = _safe(mo_p, DEFAULT_MO_PRICE),
                     )
                 _xb_h = float(_xb.get("size", 0)) if (_xb and not _xb.get("error")) else 0.0
 
@@ -2955,6 +3043,17 @@ def render_railway_sizing_tab():
                     _m_div_col  = round(_m_div_unit * _n_cols_total)
                     # Boulonnerie embase: 80€ par colonne
                     _boul_col = _n_cols_total * 80
+                    # ── MO colonnes : heures + coût ─────────────────────────
+                    # Base : n_cols × heures/colonne
+                    # + 1 forfait bracing (si config Bracing)
+                    # + 1 forfait double colonne (si config Twin column)
+                    _mop = _safe(mo_p, DEFAULT_MO_PRICE)
+                    _h_mo_col = _n_cols_total * MO_HOURS_PER_COLUMN
+                    if col_config == "Bracing":
+                        _h_mo_col += MO_HOURS_BRACING_PER_COL
+                    if col_config == "Twin column":
+                        _h_mo_col += MO_HOURS_DOUBLE_COL
+                    _cout_mo_col = _h_mo_col * _mop
                     _col_best.update({
                         "n_cols_total":  _n_cols_total,
                         "m_corniere":    round(_m_corniere),
@@ -2965,8 +3064,11 @@ def render_railway_sizing_tab():
                         "peinture_col":  round(_peinture_col, 1),
                         "d_col":         round(_peinture_col * _pp),
                         "boul_col":      _boul_col,
+                        "h_mo_col":      round(_h_mo_col, 1),
+                        "cout_mo_col":   round(_cout_mo_col),
                         "cout_col":      round(_m_col*_sp + _m_div_col*_lcp
-                                               + _peinture_col*_pp + _boul_col),
+                                               + _peinture_col*_pp + _boul_col
+                                               + _cout_mo_col),
                     })
                 _res["col_result"] = _col_best
                 _res["col_config"] = col_config
@@ -3030,6 +3132,7 @@ def render_railway_sizing_tab():
             _rr("Lasercut mass",  f"{r['m3']} kg",                          f"{r['c']} €")
             _rr("Paint",      f"{r['peinture']} L",                     f"{r['d']} €")
             _rr("Bolts",   f"{r['n_appuis']} braces",                f"{r['cout_boulonnerie']} €")
+            _rr("MO",      f"{r.get('h_mo_cr',0)} h",                f"{r.get('cout_mo_cr',0)} €")
             st.markdown(
                 f"<div style='margin-top:6px;padding:6px 10px;background:#0A1E32;border-radius:4px;"
                 f"display:flex;justify-content:space-between;font-weight:700;'>"
@@ -3093,6 +3196,7 @@ def render_railway_sizing_tab():
                 _rr("Lasercut col.",f"{col.get('m_div_col',0)} kg", f"{col.get('c_col',0)} €")
                 _rr("Paint col.",    f"{col.get('peinture_col',0)} L",f"{col.get('d_col',0)} €")
                 _rr("Bolts col.", f"{col.get('n_cols_total',0)} col.", f"{col.get('boul_col',0)} €")
+                _rr("MO col.",    f"{col.get('h_mo_col',0)} h",        f"{col.get('cout_mo_col',0)} €")
                 st.markdown(
                     f"<div style='margin-top:6px;padding:6px 10px;background:#0A1E32;"
                     f"border-radius:4px;display:flex;justify-content:space-between;font-weight:700;'>"
@@ -3134,6 +3238,8 @@ def render_railway_sizing_tab():
                         f"{_xb.get('d_paint',0)} €")
                     _rr("Bolts", f"{r.get('n_appuis',0)} braces",
                         f"{_xb.get('boul',0)} €")
+                    _rr("MO", f"{_xb.get('h_mo_xb',0)} h",
+                        f"{_xb.get('cout_mo_xb',0)} €")
                     st.markdown(
                         f"<div style='margin-top:6px;padding:6px 10px;background:#0A1E32;"
                         f"border-radius:4px;display:flex;justify-content:space-between;font-weight:700;'>"
@@ -3176,13 +3282,15 @@ def render_railway_sizing_tab():
             _xb_c    = _xb.get("c_div", 0)    if _xb_ok else 0
             _xb_d    = _xb.get("d_paint", 0)  if _xb_ok else 0
             _xb_boul = _xb.get("boul", 0)     if _xb_ok else 0
+            _xb_mo   = _xb.get("cout_mo_xb",0) if _xb_ok else 0
             # Chaque ligne additionne le poste de même nature pour runway +
             # colonnes + cross beam.
             _steel_tot = r.get("a",0) + r.get("b",0) + col.get("a_col",0) + _xb_a
             _misc_tot  = r.get("c",0) + col.get("c_col",0) + _xb_c
             _paint_tot = r.get("d",0) + col.get("d_col",0) + _xb_d
             _bolts_tot = r.get("cout_boulonnerie",0) + col.get("boul_col",0) + _xb_boul
-            _grand     = _steel_tot + _misc_tot + _paint_tot + _bolts_tot
+            _mo_tot    = r.get("cout_mo_cr",0) + col.get("cout_mo_col",0) + _xb_mo
+            _grand     = _steel_tot + _misc_tot + _paint_tot + _bolts_tot + _mo_tot
             st.markdown("### Cost summary")
             rg1, _ = st.columns(2)
             with rg1:
@@ -3190,6 +3298,7 @@ def render_railway_sizing_tab():
                 _rr("Lasercut", "", f"{_misc_tot} €")
                 _rr("Paint", "", f"{_paint_tot} €")
                 _rr("Bolts", "", f"{_bolts_tot} €")
+                _rr("MO", "", f"{_mo_tot} €")
                 st.markdown(
                     f"<div style='margin-top:8px;padding:10px 14px;background:#0A1E32;"
                     f"border:2px solid #FDAE1B;border-radius:6px;"
@@ -3202,7 +3311,155 @@ def render_railway_sizing_tab():
         # Export PDF + Extrait technique client (3D) — boutons côte à côte
         st.divider()
         st.markdown("<div style='margin-top:1.6rem'></div>", unsafe_allow_html=True)
-        _, tcol, ecol = st.columns([2, 1, 1])
+        acol, tcol, ecol, _ = st.columns([1, 1, 1, 1])
+        with acol:
+            try:
+                # Masse totale = tout ce qui est en kg (CR + rail + lasercut CR
+                #                + colonnes + lasercut col. + cross beam + lasercut xb)
+                col_d = r.get("col_result") or {}
+                xb_d  = r.get("extra_beam") or {}
+                weight_tot = (
+                    int(r.get("m1", 0)) + int(r.get("m2", 0)) + int(r.get("m3", 0))
+                    + int(col_d.get("m_col", 0)) + int(col_d.get("m_div_col", 0))
+                    + (int(xb_d.get("m_beam", 0)) + int(xb_d.get("m_div", 0))
+                       if xb_d and not xb_d.get("error") else 0)
+                )
+                # Coût total = cout_mat (CR) + cout_col + cout_cross
+                cout_tot = (
+                    int(r.get("cout_mat", 0))
+                    + int(col_d.get("cout_col", 0))
+                    + (int(xb_d.get("cout_cross", 0))
+                       if xb_d and not xb_d.get("error") else 0)
+                )
+                # Produit : Customer → "Chemin de roulement" ; Olsen → "Structure"
+                product_lbl = ("Chemin de roulement"
+                               if r.get("appui_type") == "Customer"
+                               else "Structure")
+                addition_lbl = "Suspendu" if r.get("is_suspendu") else "Posé"
+                project_lbl  = r.get("project") or ""
+
+                # CSS pour le bouton "To Add articles" — sélecteur officiel
+                # Streamlit : st.button(key="X") génère un wrapper avec la
+                # classe ".st-key-X" (depuis Streamlit 1.28).
+                st.markdown("""
+                <style>
+                  .st-key-rs_to_add_article button {
+                      background-color: #FDAE1B !important;
+                      color: #0A1E32 !important;
+                      border: 1px solid #FDAE1B !important;
+                      font-weight: 600 !important;
+                  }
+                  .st-key-rs_to_add_article button:hover {
+                      background-color: #e69b14 !important;
+                      border-color: #e69b14 !important;
+                      color: #0A1E32 !important;
+                  }
+                  .st-key-rs_to_add_article button:focus,
+                  .st-key-rs_to_add_article button:active {
+                      background-color: #e69b14 !important;
+                      border-color: #e69b14 !important;
+                      color: #0A1E32 !important;
+                      box-shadow: none !important;
+                  }
+                </style>
+                """, unsafe_allow_html=True)
+                if st.button("➕ To Add articles", use_container_width=True,
+                             type="primary",
+                             key="rs_to_add_article",
+                             help="Pré-remplit l'onglet Add Article avec ce dimensionnement."):
+                    # Résolution des libellés Category / Product à partir des
+                    # listes réellement chargées depuis Odoo. Streamlit n'affiche
+                    # la valeur d'un selectbox que si elle figure EXACTEMENT dans
+                    # ses options — on cherche donc une correspondance souple
+                    # (case-insensitive, substring) puis on retient le libellé
+                    # de la liste tel quel.
+                    def _resolve(target, options):
+                        if not target or not options:
+                            return None
+                        t = str(target).strip().lower()
+                        # 1) match exact (insensible à la casse)
+                        for o in options:
+                            if str(o).strip().lower() == t:
+                                return o
+                        # 2) match par préfixe / substring
+                        for o in options:
+                            if t in str(o).strip().lower():
+                                return o
+                        return None
+
+                    _cat_list  = list(ss.get("category_list", []) or [])
+                    _cat_resolved = _resolve("Olsen", _cat_list)
+                    _prod_list = (list(ss.get("category_to_products", {})
+                                        .get(_cat_resolved, []) or [])
+                                  if _cat_resolved else [])
+                    _prod_resolved = _resolve(product_lbl, _prod_list)
+
+                    # Si Category/Product introuvables, on prévient et on
+                    # n'incrémente pas (l'utilisateur peut compléter à la main).
+                    _missing = []
+                    if not _cat_resolved:
+                        _missing.append(
+                            f"Category « Olsen » introuvable parmi : "
+                            f"{_cat_list or 'aucune liste chargée'}")
+                    if _cat_resolved and not _prod_resolved:
+                        _missing.append(
+                            f"Product « {product_lbl} » introuvable dans la "
+                            f"catégorie « {_cat_resolved} » parmi : "
+                            f"{_prod_list or 'aucun produit'}")
+
+                    if _missing:
+                        for m_msg in _missing:
+                            st.warning("⚠️ " + m_msg)
+                        st.info(
+                            "Les autres champs (projet, prix, marge, poids, "
+                            "délai) seront tout de même pré-remplis ; tu pourras "
+                            "compléter Category / Product manuellement.")
+
+                    _ct_new = int(ss.get("clear_trigger", 0)) + 1
+                    ss["clear_trigger"] = _ct_new
+                    # Mode "création" (pas "update") : on SUPPRIME la clé du
+                    # toggle pour qu'il reprenne sa valeur par défaut (False)
+                    # au prochain rerun. Une assignation directe est interdite
+                    # par Streamlit car le widget a déjà été instancié.
+                    if "aa_update_mode" in ss:
+                        del ss["aa_update_mode"]
+                    ss[f"aa_project_{_ct_new}"]   = project_lbl
+                    if _cat_resolved:
+                        ss[f"aa_category_{_ct_new}"] = _cat_resolved
+                    if _prod_resolved:
+                        ss[f"aa_product_{_ct_new}"]  = _prod_resolved
+                    # Marge à 40 % — la clé du widget dépend du Product
+                    # effectivement sélectionné. On couvre les cas usuels :
+                    #   • Product résolu → "aa_margin_{ct}_{Product}"
+                    #   • Product None   → "aa_margin_{ct}_None"
+                    #   • Product vide   → "aa_margin_{ct}_"
+                    # Ainsi quel que soit le suffixe utilisé par le widget, on
+                    # garantit qu'il trouve "40" en session_state.
+                    for _suf in (_prod_resolved, "None", ""):
+                        if _suf is not None:
+                            ss[f"aa_margin_{_ct_new}_{_suf}"] = "40"
+                    ss[f"aa_addition_{_ct_new}"]  = addition_lbl
+                    # Span : crane_span × total_length UNIQUEMENT si pont
+                    # suspendu ET appui Olsen ; sinon total_length seule.
+                    _tl = int(r.get("total_length_mm", 0) or 0)
+                    _cs = int(r.get("crane_span_mm", 0) or 0)
+                    if (r.get("is_suspendu") and r.get("appui_type") == "Olsen"
+                            and _cs > 0 and _tl > 0):
+                        ss[f"aa_span_{_ct_new}"] = f"{_cs}x{_tl}"
+                    elif _tl > 0:
+                        ss[f"aa_span_{_ct_new}"] = str(_tl)
+                    ss[f"aa_net_manual_{_ct_new}"] = str(cout_tot)
+                    ss[f"aa_delay_{_ct_new}"]     = "60"
+                    ss[f"aa_weight_{_ct_new}"]    = str(weight_tot)
+                    # Flag pour afficher une pop-up de confirmation au rerun
+                    ss["rs_to_add_done"] = True
+                    st.rerun()
+                # Pop-up de confirmation après rerun
+                if ss.pop("rs_to_add_done", False):
+                    st.toast("✔ Infos transmises à l'onglet « Add Article ».",
+                             icon="✅")
+            except Exception as ex:
+                st.warning(f"To Add articles non disponible : {ex}")
         with tcol:
             try:
                 tech_bytes = _make_tech_extract_html(r)

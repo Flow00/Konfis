@@ -2008,6 +2008,11 @@ def _make_tech_extract_html(r):
     définitives et à la validation finale par le bureau d'études. Document non contractuel.
   </div>
 
+  <h2>Synthèse technique</h2>
+  <table class="spec">__SPEC_ROWS__</table>
+  __COL_SECTION__
+  __XB_SECTION__
+
   <h2>Visualisation 3D de la structure</h2>
   <div id="view3d"><div class="hint">🖱️ Glisser pour pivoter · molette pour zoomer · clic droit pour déplacer</div></div>
   <div class="legend">
@@ -2023,11 +2028,6 @@ def _make_tech_extract_html(r):
     <button onclick="window.print()">🖨️ Imprimer / PDF</button>
     <button onclick="resetView()">↺ Réinitialiser la vue</button>
   </div>
-
-  <h2>Synthèse technique</h2>
-  <table class="spec">__SPEC_ROWS__</table>
-  __COL_SECTION__
-  __XB_SECTION__
 </div>
 
 <footer>© Floow | All rights reserved — Prédimensionnement, document non contractuel soumis à révision</footer>
@@ -2156,10 +2156,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const g=new THREE.Group();
 
   // Hauteur de la poutre du pont, proportionnelle à la réaction au galet.
-  // Réf : ~250 mm de hauteur de caisson pour 30 kN, bornée pour rester lisible.
+  // Référence : ~180 mm pour 30 kN, +4 mm par kN supplémentaire. Bornes
+  // basses adoucies pour éviter une poutre trop haute à faible charge.
   const rvEff = (rv && rv>0) ? rv : 30;
-  let gh = 250 + (rvEff-30)*6;            // mm
-  gh = Math.max(bh*0.7, Math.min(gh, bh*2.4));
+  let gh = 180 + (rvEff-30)*4;            // mm
+  gh = Math.max(bh*0.45, Math.min(gh, bh*2.0));
   const gw = gh*0.55;                      // largeur du caisson (sens X)
 
   const wheelR = bh*0.26;
@@ -2198,24 +2199,22 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     });
   });
 
-  // ── Poutre CAISSON (box girder) enjambant les 2 voies (le long de Z) ─────
-  // Caisson = 2 âmes verticales + semelle sup + semelle inf, avec raidisseurs.
-  const tWeb=Math.max(gh*0.10,6), tFl=Math.max(gh*0.12,8);
-  // semelles haute et basse
+  // ── Poutre CAISSON (box girder) — volume plein fermé ─────────────────────
+  // Caisson jaune ABUS, plein, enjambant les 2 voies (le long de Z).
+  const caisson = box(gw, gh, span, ABUS);
+  caisson.position.set(0, yGird, 0); g.add(caisson);
+
+  // Chanfreins à 45° sur les 2 arêtes supérieures (typique pont ABUS).
+  // Chaque chanfrein est une boîte fine inclinée à 45° le long de l'arête.
+  const chamf = gh*0.18;                              // largeur du chanfrein
   [+1,-1].forEach(sgn=>{
-    const fl=box(gw, tFl, span, ABUS);
-    fl.position.set(0, yGird + sgn*(gh*0.5 - tFl*0.5), 0); g.add(fl);
+    const c = box(chamf*Math.SQRT2, chamf*0.55, span, ABUS_D);
+    // Position : sur l'arête supérieure (gauche ou droite)
+    c.position.set(sgn*(gw*0.5 - chamf*0.35),
+                   yGird + gh*0.5 - chamf*0.35, 0);
+    c.rotation.z = sgn * Math.PI/4;                   // 45°
+    g.add(c);
   });
-  // 2 âmes latérales
-  [+1,-1].forEach(sgn=>{
-    const web=box(tWeb, gh-2*tFl, span, sgn>0?ABUS:ABUS_D);
-    web.position.set(sgn*(gw*0.5 - tWeb*0.5), yGird, 0); g.add(web);
-  });
-  // raidisseurs transversaux (le long de la poutre)
-  for(let i=-3;i<=3;i++){
-    const st=box(gw*1.02, gh*0.86, tWeb, ABUS_D);
-    st.position.set(0, yGird, i*span*0.14); g.add(st);
-  }
 
   // ── Chariot (trolley) + treuil sur le dessus de la poutre ────────────────
   const yTrolley = yGird + (hung ? -gh*0.5 - bh*0.3 : gh*0.5 + bh*0.3);
@@ -2225,9 +2224,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   drum.rotation.x=Math.PI/2; drum.position.set(0, yTrolley, span*0.12); g.add(drum);
 
   // ── Palan : câbles + moufle + crochet (pend toujours VERS LE BAS) ────────
-  // Démarre sous le caisson et descend franchement, pour que le crochet soit
-  // nettement SOUS la poutre du pont.
-  const dropTop = (yGird - gh*0.5) - bh*0.05;     // bas du caisson
+  // Posé    : démarre nettement SOUS le bas du caisson pour que le palan soit
+  //           clairement détaché de la poutre du pont (sinon visuellement
+  //           confondu avec elle).
+  // Suspendu: idem, démarre sous la poutre vers le bas.
+  const dropTop = (yGird - gh*0.5) - bh*0.4;      // gap visible sous le caisson
   const dropLen = Math.max(bh*3.5, gh*2.2), zc = span*0.12;
   [-1,1].forEach(d=>{
     const cable=box(bh*0.05, dropLen, bh*0.05, BLACK);

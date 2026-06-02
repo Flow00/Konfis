@@ -2155,11 +2155,15 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const DARK=0x33373b, STEEL=0x7a8794, BLACK=0x222426;
   const g=new THREE.Group();
 
-  // Hauteur de la poutre du pont, proportionnelle à la réaction au galet.
-  // Référence : ~140 mm pour 30 kN, +3 mm par kN supplémentaire.
+  // Hauteur de la poutre du pont — dimensionnée VISUELLEMENT pour rester
+  // proportionnée à la portée du pont (sinon un caisson de 140 mm sur 7 m
+  // de portée apparaît comme une lame plate).
+  //   • Plancher : span / 25  → caisson toujours visible quelle que soit la portée.
+  //   • Bonus    : 140 + (rv-30)*3 si la charge est forte.
+  //   • Bornes   : entre bh*0.5 et bh*2 pour rester proportionné au CR.
   const rvEff = (rv && rv>0) ? rv : 30;
-  let gh = 140 + (rvEff-30)*3;            // mm
-  gh = Math.max(bh*0.35, Math.min(gh, bh*1.6));
+  let gh = Math.max(span / 25, 140 + (rvEff-30)*3);
+  gh = Math.max(bh*0.5, Math.min(gh, bh*2.0));
   const gw = gh*0.75;                      // largeur caisson (plus marquée)
 
   const wheelR = bh*0.26;

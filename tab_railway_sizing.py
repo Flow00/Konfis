@@ -2314,7 +2314,12 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
         geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
         geo.setIndex(idx);
         geo.computeVertexNormals();
-        const m = new THREE.Mesh(geo, mat(ABUS));
+        // DoubleSide pour s'assurer qu'aucun triangle ne soit invisible si le
+        // winding est inversé (les coins du caisson étaient creux sans ça).
+        const prismMat = new THREE.MeshLambertMaterial({
+          color: ABUS, side: THREE.DoubleSide,
+        });
+        const m = new THREE.Mesh(geo, prismMat);
         g.add(m);
       });
     }
@@ -2340,11 +2345,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     ctx.fillRect(0, 0, 1024, 210);
     ctx.fillStyle = '#1f6cb5';
     // Police calibrée pour rester DANS le canvas avec marges :
-    // "ABUS" en 900 à ~150px fait ~520px de large → 250px de marge de chaque côté.
-    ctx.font = '900 150px Arial,Helvetica,sans-serif';
+    // "ABUS" en 900 à ~190px fait ~700px de large → 160px de marge de chaque côté.
+    ctx.font = '900 190px Arial,Helvetica,sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('ABUS', 512, 115);
+    ctx.fillText('ABUS', 512, 110);
     const tex = new THREE.CanvasTexture(cnv);
     tex.minFilter = THREE.LinearFilter;       // pas de mipmap → texte net
     tex.magFilter = THREE.LinearFilter;
@@ -2373,19 +2378,24 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // ── Palan : trolley + tambour en RAL 5017 (bleu trafic) ──────────────────
   // RAL 5017 ≈ #1f4e8c — bleu profond.
   // Moufle et crochet en RAL 1007 (jaune narcisse) = couleur ABUS = E1A100.
+  // Le palan est positionné de sorte qu'il REMONTE dans le caisson (comme
+  // s'il était maintenu par des galets internes) au lieu de pendre sous lui.
   const RAL_5017 = 0x1f4e8c;
   const RAL_1007 = 0xE1A100;
-  const yTrolley = yGird - gh*0.5 - bh*0.3;       // sous le caisson
-  const trolley = box(gw*1.6, bh*0.6, bh*1.4, RAL_5017);
+  const trolH = bh*1.0;                          // hauteur du trolley (plus haut)
+  // Remonter dans le caisson : le HAUT du trolley est au niveau du bas du caisson + 30% trolH
+  // → le trolley chevauche partiellement le bas du caisson.
+  const yTrolley = yGird - gh*0.5 + trolH*0.2;   // remonté dans la poutre
+  const trolley = box(gw*1.6, trolH, bh*1.4, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(
-    new THREE.CylinderGeometry(bh*0.3, bh*0.3, bh*1.0, 18),
+    new THREE.CylinderGeometry(bh*0.35, bh*0.35, bh*1.0, 18),
     mat(RAL_5017));
   drum.rotation.x = Math.PI/2;
   drum.position.set(0, yTrolley, 0); g.add(drum);
 
   // ── Câbles + moufle + crochet qui pendent sous le palan ──────────────────
-  const dropTop = yTrolley - bh*0.3;
+  const dropTop = yTrolley - trolH*0.5;          // sortie des câbles sous le trolley
   const dropLen = Math.max(bh*2.5, gh*1.8);
   [-1,1].forEach(d=>{
     const cable = box(bh*0.05, dropLen, bh*0.05, BLACK);

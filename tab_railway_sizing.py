@@ -2293,16 +2293,19 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const stickH = gh*0.32;
   (function(){
     const cnv = document.createElement('canvas');
-    cnv.width = 256; cnv.height = 96;
+    cnv.width = 1024; cnv.height = 384;
     const ctx = cnv.getContext('2d');
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, 256, 96);
+    ctx.fillRect(0, 0, 1024, 384);
     ctx.fillStyle = '#1f6cb5';
-    ctx.font = 'bold 70px Arial,sans-serif';
+    ctx.font = 'bold 280px Arial,sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('ABUS', 128, 50);
+    ctx.fillText('ABUS', 512, 200);
     const tex = new THREE.CanvasTexture(cnv);
+    tex.minFilter = THREE.LinearFilter;       // pas de mipmap → texte net
+    tex.magFilter = THREE.LinearFilter;
+    tex.anisotropy = 16;                       // max anti-aliasing à angle oblique
     tex.needsUpdate = true;
     const stickMat = new THREE.MeshBasicMaterial({
       map: tex, side: THREE.DoubleSide,

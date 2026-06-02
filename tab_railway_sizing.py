@@ -2337,8 +2337,13 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
         geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
         geo.setIndex(idx);
         geo.computeVertexNormals();
-        // FrontSide (par défaut) — les windings sont maintenant corrects.
-        const m = new THREE.Mesh(geo, mat(ABUS));
+        // DoubleSide pour garantir que toutes les faces du prisme sont visibles
+        // quelle que soit l'orientation des normales (ça nous évite un coin
+        // invisible sur les versions précédentes).
+        const prismMat = new THREE.MeshLambertMaterial({
+          color: ABUS, side: THREE.DoubleSide,
+        });
+        const m = new THREE.Mesh(geo, prismMat);
         g.add(m);
       });
     }
@@ -2401,9 +2406,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // s'il était maintenu par des galets internes) au lieu de pendre sous lui.
   const RAL_5017 = 0x1f4e8c;
   const RAL_1007 = 0xE1A100;
-  const trolH = bh*1.4;                          // hauteur du trolley (plus haut)
-  // Remonter dans le caisson : chevauchement à moitié dans la poutre.
-  const yTrolley = yGird - gh*0.5 + trolH*0.45;  // bien remonté dans la poutre
+  const trolH = bh*1.4;                          // hauteur du trolley
+  // On veut que le HAUT du trolley arrive à mi-hauteur du caisson.
+  // → yTrolley (centre) = yGird (centre caisson) - trolH/2
+  // → bas du trolley à yGird - trolH ; haut à yGird.
+  const yTrolley = yGird - trolH*0.5;
   const trolley = box(gw*1.6, trolH, bh*1.4, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(

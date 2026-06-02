@@ -2179,12 +2179,16 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // Suspendu: galet sous la voie, miroir vertical.
   const yWheel = hung ? (yRailTop - wheelR) : (yRailTop + wheelR);
   const ySom   = hung ? (yWheel - somH*0.5) : (yWheel + somH*0.5);
-  // Bas du caisson = bas du sommier (au lieu de "posé sur le sommier")
+  // Bas du caisson = bas du sommier pour POSÉ.
+  // SUSPENDU : caisson SUSPENDU SOUS le sommier — haut du caisson est au
+  //            niveau du bas du sommier, et le caisson descend sur sa hauteur gh.
   //   posé    : centre caisson = ySom - somH/2 + gh/2
-  //   suspendu: caisson DÉPASSE de 300 mm au-dessus du haut du sommier
-  //             centre caisson = ySom + somH/2 + 300 - gh/2
-  const SUSP_OVER = 300;                          // dépassement [mm]
-  const yGird  = hung ? (ySom + somH*0.5 + SUSP_OVER - gh*0.5)
+  //   suspendu: centre caisson = ySom - somH/2 - gh/2  (sous le sommier)
+  //
+  // Le dépassement de 300 mm en Z (longueur) est géré dans la longueur du
+  // caisson (span + 2*300), pas en hauteur.
+  const SUSP_OVER = 300;                          // dépassement en Z [mm]
+  const yGird  = hung ? (ySom - somH*0.5 - gh*0.5)
                       : (ySom - somH*0.5 + gh*0.5);
 
   // ── Sommiers + galets (un par voie) ──────────────────────────────────────
@@ -2299,12 +2303,23 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     ctx.textBaseline = 'middle';
     ctx.fillText('ABUS', 128, 50);
     const tex = new THREE.CanvasTexture(cnv);
-    const stickMat = new THREE.MeshBasicMaterial({map: tex});
+    tex.needsUpdate = true;
+    const stickMat = new THREE.MeshBasicMaterial({
+      map: tex, side: THREE.DoubleSide,
+    });
     [+1,-1].forEach(sgn=>{
       const plane = new THREE.Mesh(
         new THREE.PlaneGeometry(stickW, stickH), stickMat);
+      // Le plan doit être collé contre le flanc latéral du caisson, donc
+      // perpendiculaire à X. On le pose à x = ±gw/2 (juste à la surface du
+      // caisson), centré verticalement, et on le tourne pour que la normale
+      // soit ±X.
       plane.position.set(sgn*(gw*0.5 + 1), yGird, 0);
-      plane.rotation.y = sgn > 0 ? -Math.PI/2 : Math.PI/2;
+      // PlaneGeometry par défaut est dans le plan X-Y (normale = Z).
+      // Pour le coller en X = +gw/2 (sticker visible depuis +X), il faut
+      // tourner pour que la normale aille vers +X, donc rotation Y = +π/2.
+      // Pour x = -gw/2 (visible depuis -X), normale vers -X, rotation Y = -π/2.
+      plane.rotation.y = sgn > 0 ? Math.PI/2 : -Math.PI/2;
       g.add(plane);
     });
   })();

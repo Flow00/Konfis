@@ -3555,12 +3555,19 @@ def render_railway_sizing_tab():
 
                     _ct_new = int(ss.get("clear_trigger", 0)) + 1
                     ss["clear_trigger"] = _ct_new
-                    # Mode "création" (pas "update") : on SUPPRIME la clé du
-                    # toggle pour qu'il reprenne sa valeur par défaut (False)
-                    # au prochain rerun. Une assignation directe est interdite
-                    # par Streamlit car le widget a déjà été instancié.
-                    if "aa_update_mode" in ss:
-                        del ss["aa_update_mode"]
+                    # Mode "création" (pas "update") : on force le toggle à
+                    # False SANS déclencher la transition "ON→OFF" du côté
+                    # add_article, qui sinon viderait automatiquement les
+                    # prix qu'on vient de pré-remplir.
+                    # → On positionne directement aa_update_mode=False ET on
+                    # synchronise _aa_prev_update_mode pour éviter la détection
+                    # de transition.
+                    # NB : on est sur l'onglet Railway Sizing, le widget
+                    # aa_update_mode n'est PAS rendu dans ce run → assignation
+                    # autorisée par Streamlit.
+                    ss["aa_update_mode"]       = False
+                    ss["_aa_prev_update_mode"] = False
+                    ss["_aa_clear_after_update"] = False
                     ss[f"aa_project_{_ct_new}"]   = project_lbl
                     if _cat_resolved:
                         ss[f"aa_category_{_ct_new}"] = _cat_resolved

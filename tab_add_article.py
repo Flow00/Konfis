@@ -803,6 +803,14 @@ def render_add_article_tab(db_name, models_url, debug=False):
     if ss.get("_aa_reset_update_toggle"):
         ss["aa_update_mode"] = False
         ss["_aa_reset_update_toggle"] = False
+    # Reset toggle SANS déclencher le clear des prix (utilisé par le bouton
+    # "To Add articles" depuis Railway Sizing, pour ne pas vider les prix
+    # qu'on vient de pré-remplir).
+    if ss.get("_aa_force_off_no_clear"):
+        ss["aa_update_mode"]        = False
+        ss["_aa_prev_update_mode"]  = False    # bloque détection ON→OFF
+        ss["_aa_clear_after_update"]= False
+        ss["_aa_force_off_no_clear"]= False
     _upd_msg = ss.pop("_aa_update_msg", None)
     if _upd_msg:
         st.success(_upd_msg)

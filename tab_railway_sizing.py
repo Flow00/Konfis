@@ -2877,7 +2877,7 @@ def render_railway_sizing_tab():
     c5, c6, c7, _c8 = st.columns(4)
     with c5:
         _lrv = "Rv wheel [kN] ❌" if not rv_cur else "Rv wheel [kN]"
-        rv = _ni(_lrv, "rs_rv")
+        rv = _nf_nodef(_lrv, "rs_rv")
     with c6:
         _lcl = "Carriage length [mm] ❌" if not clen_cur else "Carriage length [mm]"
         carriage = _ni_select(_lcl, "rs_clen", CARRIAGE_PRESETS)
@@ -2916,7 +2916,7 @@ def render_railway_sizing_tab():
         c9, c10, c11, _c12 = st.columns(4)
         with c9:
             _lrv2 = "Rv wheel 2 [kN] ❌" if not rv2_cur else "Rv wheel 2 [kN]"
-            rv2 = _ni(_lrv2, "rs_rv2")
+            rv2 = _nf_nodef(_lrv2, "rs_rv2")
         with c10:
             _lcl2 = "Carriage length 2 [mm] ❌" if not clen2_cur else "Carriage length 2 [mm]"
             carriage2 = _ni_select(_lcl2, "rs_clen2", CARRIAGE_PRESETS)

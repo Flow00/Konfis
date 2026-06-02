@@ -2199,37 +2199,60 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     });
   });
 
-  // ── Poutre CAISSON (box girder) — volume plein fermé ─────────────────────
-  // Caisson jaune ABUS, plein, enjambant les 2 voies (le long de Z).
-  const caisson = box(gw, gh, span, ABUS);
-  caisson.position.set(0, yGird, 0); g.add(caisson);
+  // ── Poutre CAISSON (box girder) — section pentagonale type ABUS ──────────
+  // Section : rectangle avec les 2 arêtes supérieures coupées à 45° (pan
+  // coupé). Réalisé via ExtrudeGeometry depuis un Shape 2D, extrudé sur
+  // toute la portée (le long de Z).
+  const chamf = gh*0.18;                       // largeur du chanfrein 45°
+  const sec = new THREE.Shape();
+  // Tracé de la section (dans le plan X-Y) — pentagone :
+  //   bas gauche → haut gauche (avant chanfrein) → sommet gauche du chanfrein
+  //   → sommet droit du chanfrein → haut droit (avant chanfrein) → bas droit
+  sec.moveTo(-gw/2, -gh/2);
+  sec.lineTo(-gw/2,  gh/2 - chamf);
+  sec.lineTo(-gw/2 + chamf,  gh/2);
+  sec.lineTo( gw/2 - chamf,  gh/2);
+  sec.lineTo( gw/2, gh/2 - chamf);
+  sec.lineTo( gw/2, -gh/2);
+  sec.lineTo(-gw/2, -gh/2);
+  const caissonGeo = new THREE.ExtrudeGeometry(sec, {
+    depth: span, bevelEnabled: false, steps: 1,
+  });
+  caissonGeo.translate(0, 0, -span/2);          // recentrer en Z
+  const caisson = new THREE.Mesh(caissonGeo, mat(ABUS));
+  caisson.position.set(0, yGird, 0);
+  g.add(caisson);
 
-  // Chanfreins à 45° sur les 2 arêtes supérieures (typique pont ABUS).
-  // Chaque chanfrein est une boîte fine inclinée à 45° le long de l'arête.
-  const chamf = gh*0.18;                              // largeur du chanfrein
+  // ── Sticker ABUS (rectangle bleu) sur chaque flanc de la poutre ──────────
+  // Bleu ABUS ≈ #1f6cb5. Plaqué légèrement en surface du flanc latéral.
+  const stickW = Math.min(span*0.18, gh*4);     // largeur sticker
+  const stickH = gh*0.32;                       // hauteur sticker
+  const stickT = 2;                             // épaisseur (pour décollage)
   [+1,-1].forEach(sgn=>{
-    const c = box(chamf*Math.SQRT2, chamf*0.55, span, ABUS_D);
-    // Position : sur l'arête supérieure (gauche ou droite)
-    c.position.set(sgn*(gw*0.5 - chamf*0.35),
-                   yGird + gh*0.5 - chamf*0.35, 0);
-    c.rotation.z = sgn * Math.PI/4;                   // 45°
-    g.add(c);
+    const stick = box(stickT, stickH, stickW, 0x1f6cb5);
+    stick.position.set(sgn*(gw*0.5 + stickT*0.5), yGird, 0);
+    g.add(stick);
+    // bande blanche en bas du sticker pour le côté carré du logo
+    const band = box(stickT, stickH*0.18, stickW, 0xffffff);
+    band.position.set(sgn*(gw*0.5 + stickT*0.6),
+                      yGird - stickH*0.5 + stickH*0.09, 0);
+    g.add(band);
   });
 
   // ── Chariot (trolley) + treuil sur le dessus de la poutre ────────────────
+  // Centré sur le caisson (zc = 0) pour que le palan tombe pile au milieu.
   const yTrolley = yGird + (hung ? -gh*0.5 - bh*0.3 : gh*0.5 + bh*0.3);
   const trolley=box(gw*1.6, bh*0.6, bh*1.4, DARK);
-  trolley.position.set(0, yTrolley, span*0.12); g.add(trolley);
+  trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum=new THREE.Mesh(new THREE.CylinderGeometry(bh*0.3,bh*0.3,bh*1.0,18),mat(0x3c3f43));
-  drum.rotation.x=Math.PI/2; drum.position.set(0, yTrolley, span*0.12); g.add(drum);
+  drum.rotation.x=Math.PI/2; drum.position.set(0, yTrolley, 0); g.add(drum);
 
   // ── Palan : câbles + moufle + crochet (pend toujours VERS LE BAS) ────────
   // Posé    : démarre nettement SOUS le bas du caisson pour que le palan soit
-  //           clairement détaché de la poutre du pont (sinon visuellement
-  //           confondu avec elle).
-  // Suspendu: idem, démarre sous la poutre vers le bas.
+  //           clairement détaché de la poutre du pont.
+  // Suspendu: idem.
   const dropTop = (yGird - gh*0.5) - bh*0.4;      // gap visible sous le caisson
-  const dropLen = Math.max(bh*3.5, gh*2.2), zc = span*0.12;
+  const dropLen = Math.max(bh*3.5, gh*2.2), zc = 0;
   [-1,1].forEach(d=>{
     const cable=box(bh*0.05, dropLen, bh*0.05, BLACK);
     cable.position.set(d*bh*0.18, dropTop - dropLen/2, zc); g.add(cable);

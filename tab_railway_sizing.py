@@ -2352,7 +2352,7 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // indépendant de la taille du CR).
   const yTrolley = yGird - gh*0.5 + 100 - trolH*0.5;
   // Châssis plus large dans la vue de profil (dimension Z = profondeur).
-  const trolley = box(gw*1.6, trolH, bh*2.2, RAL_5017);
+  const trolley = box(gw*1.6, trolH, bh*3.0, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(
     new THREE.CylinderGeometry(bh*0.4, bh*0.4, bh*1.0, 18),

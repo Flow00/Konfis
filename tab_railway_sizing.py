@@ -2156,12 +2156,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const g=new THREE.Group();
 
   // Hauteur de la poutre du pont, proportionnelle à la réaction au galet.
-  // Référence : ~140 mm pour 30 kN, +3 mm par kN supplémentaire. Bornes
-  // pour rester proportionné même à faible/forte charge.
+  // Référence : ~140 mm pour 30 kN, +3 mm par kN supplémentaire.
   const rvEff = (rv && rv>0) ? rv : 30;
   let gh = 140 + (rvEff-30)*3;            // mm
   gh = Math.max(bh*0.35, Math.min(gh, bh*1.6));
-  const gw = gh*0.45;                      // largeur du caisson (sens X)
+  const gw = gh*0.75;                      // largeur caisson (plus marquée)
 
   const wheelR = bh*0.26;
   const somH   = bh*0.5;                   // hauteur caisson sommier (réduite)
@@ -2225,9 +2224,9 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   //   de chaque côté → longueur = span + 600.
   if (!hung) {
     // ── POSÉ : trapèze vu de face ─────────────────────────────────────────
-    // Clamp : le chanfrein ne peut pas dépasser la demi-largeur du caisson
-    // (sinon le trapèze "se croise" et le sommet supérieur disparaît).
-    const ch45 = Math.max(0, Math.min(gh - somH, gw * 0.45));
+    // Clamp : le chanfrein occupe au plus 30 % de la demi-largeur du caisson,
+    // pour garder une "casquette" plate sur le dessus (sinon trapèze trop pointu).
+    const ch45 = Math.max(0, Math.min(gh - somH, gw * 0.3));
     const halfZ = span * 0.5;
     const yTop = +gh/2, yBot = -gh/2;
     const xTopL = -(gw/2 - ch45), xTopR = +(gw/2 - ch45);  // arête sup

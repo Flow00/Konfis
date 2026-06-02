@@ -2233,61 +2233,91 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // SUSPENDU : caisson rectangulaire, sans chanfreins. Dépassement 300 mm
   //   de chaque côté → longueur = span + 600.
   if (!hung) {
-    // Clamp : ch45 ≤ 30% du demi-span pour éviter un hexagone trop pointu
-    // (sinon la face supérieure disparaît sur les petites portées).
+    // ── POSÉ : caisson hexagonal vu de profil, fait d'assemblages simples ─
+    // Au lieu d'une BufferGeometry hexagonale (winding fragile), on assemble :
+    //   • Box basse : partie du caisson au niveau du sommier — pleine longueur.
+    //   • Box haute : partie qui dépasse le sommier — raccourcie aux 2 bouts.
+    //   • 2 prismes triangulaires : transition 45° entre les 2 niveaux.
+    // Avantage : chaque morceau utilise BoxGeometry → normales toujours OK.
     const ch45 = Math.max(0, Math.min(gh - somH, span * 0.15));
-    const halfZ = span * 0.5;
-    const yTop = +gh/2, yBot = -gh/2;
-    const yMid = yTop - ch45;
-    const xL = -gw/2, xR = +gw/2;
-    // 12 sommets : 6 sur le flanc gauche (x=xL), 6 sur le flanc droit (x=xR).
-    const verts = new Float32Array([
-      // flanc gauche (x = xL)
-      xL, yBot, -halfZ,         // 0 — bas-arrière
-      xL, yBot, +halfZ,         // 1 — bas-avant
-      xL, yMid, -halfZ,         // 2 — début chanfrein arrière
-      xL, yMid, +halfZ,         // 3 — début chanfrein avant
-      xL, yTop, -halfZ + ch45,  // 4 — sommet arrière (après chanfrein)
-      xL, yTop, +halfZ - ch45,  // 5 — sommet avant
-      // flanc droit (x = xR)
-      xR, yBot, -halfZ,         // 6
-      xR, yBot, +halfZ,         // 7
-      xR, yMid, -halfZ,         // 8
-      xR, yMid, +halfZ,         // 9
-      xR, yTop, -halfZ + ch45,  // 10
-      xR, yTop, +halfZ - ch45,  // 11
-    ]);
-    // Triangles (sens trigo, normale vers l'extérieur).
-    const indices = [
-      // Face gauche (x = xL, hexagone) : 0-1-3-5-4-2 — normale vers -X
-      0, 3, 1,  0, 5, 3,  0, 4, 5,  0, 2, 4,
-      // Face droite (x = xR, hexagone) : 6-8-10-11-9-7 — normale vers +X
-      6, 7, 9,  6, 9, 11, 6, 11, 10, 6, 10, 8,
-      // Face basse (y = yBot, entre 0-1 et 6-7) — normale vers -Y
-      0, 1, 7,  0, 7, 6,
-      // Face avant pleine hauteur (z = +halfZ, entre 1-3 et 7-9) — normale +Z
-      1, 3, 9,  1, 9, 7,
-      // Chanfrein avant (de yMid à yTop incliné vers Z=−ch45) — normale (+Y, +Z)
-      3, 5, 11, 3, 11, 9,
-      // Face supérieure (z entre −halfZ+ch45 et +halfZ−ch45, y = yTop) — normale +Y
-      5, 4, 10, 5, 10, 11,
-      // Chanfrein arrière (de yTop à yMid incliné vers Z=−halfZ) — normale (+Y, −Z)
-      4, 2, 8,  4, 8, 10,
-      // Face arrière pleine hauteur (z = −halfZ, entre 2-0 et 8-6) — normale −Z
-      2, 0, 6,  2, 6, 8,
-    ];
-    const caissonGeo = new THREE.BufferGeometry();
-    caissonGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-    caissonGeo.setIndex(indices);
-    caissonGeo.computeVertexNormals();
-    // DoubleSide : on rend les faces des deux côtés. Évite que le caisson
-    // paraisse transparent si certaines normales sont mal orientées (effet
-    // qu'on a observé avec FrontSide par défaut).
-    const caissonMat = new THREE.MeshLambertMaterial({
-      color: ABUS, side: THREE.DoubleSide,
-    });
-    const caisson = new THREE.Mesh(caissonGeo, caissonMat);
-    caisson.position.set(0, yGird, 0); g.add(caisson);
+    // Longueur en Z : s'arrête au nu intérieur des sommiers
+    const lenLow = span - somW;                  // partie basse, longueur
+    const lenHi  = Math.max(50, lenLow - 2*ch45); // partie haute, raccourcie
+
+    // Partie basse (profondeur somH)
+    const lowH = (gh - ch45);                    // partie basse = gh - ch45
+    const yLow = -gh/2 + lowH/2;                 // centre vertical
+    const lowBox = box(gw, lowH, lenLow, ABUS);
+    lowBox.position.set(0, yGird + yLow, 0); g.add(lowBox);
+
+    // Partie haute (au-dessus, plus courte)
+    if (ch45 > 0 && lenHi > 0) {
+      const yHi = +gh/2 - ch45/2;
+      const hiBox = box(gw, ch45, lenHi, ABUS);
+      hiBox.position.set(0, yGird + yHi, 0); g.add(hiBox);
+
+      // 2 prismes triangulaires aux extrémités (transition 45°)
+      // Vu de profil (plan Y-Z), section triangulaire :
+      //   sommet haut au début de la partie haute (z = ±lenHi/2, y = yMid)
+      //   2 sommets bas : (z = ±lenLow/2, y = yMid) et (z = ±lenHi/2, y = yMid)
+      // Wait : il faut un triangle 45° qui descend de la partie haute à la partie basse.
+      // Triangle au bout +Z : sommets (en Y-Z) :
+      //   A = (yMid, +lenHi/2)  ← début de la partie haute, en haut
+      //   B = (yMid, +lenLow/2) ← fin de la partie basse, au niveau yMid
+      //   C = (yMid - ch45, +lenHi/2) ?  
+      // En fait pour avoir 45°, le triangle est rectangle :
+      //   A = sommet du caisson, fin de la partie haute = (yTop, +lenHi/2)
+      //   Mais yTop est au niveau de la partie haute, et la transition descend.
+      // Plus simple : triangle dont les 3 sommets sont :
+      //   A = (+lenHi/2, yMid+ch45) sur la partie haute, dessus
+      //   B = (+lenLow/2, yMid) en bas du chanfrein
+      //   C = (+lenHi/2, yMid) intérieur (vertical) - non visible
+      // Avec extrusion sur gw. C'est un prisme triangulaire.
+      const yMidY = yGird + (+gh/2 - ch45);      // niveau de la transition
+      const yTopY = yGird + (+gh/2);             // sommet du caisson
+      [+1, -1].forEach(sgnZ=>{
+        // Sommets du prisme (6 sommets : triangle × 2 plans X = ±gw/2)
+        const zHi = sgnZ * lenHi/2;              // côté intérieur (lié à la box haute)
+        const zLo = sgnZ * lenLow/2;             // côté extérieur (lié à la box basse)
+        // Triangle vu en Y-Z :
+        //   P0 = (yTopY, zHi)  sommet, lié à l'angle supérieur de la box haute
+        //   P1 = (yMidY, zHi)  intérieur (caché, dans la box)
+        //   P2 = (yMidY, zLo)  bas du chanfrein, lié à la box basse
+        const verts = new Float32Array([
+          -gw/2, yTopY, zHi,    // 0  gauche-haut
+          -gw/2, yMidY, zHi,    // 1  gauche-intérieur
+          -gw/2, yMidY, zLo,    // 2  gauche-extérieur
+          +gw/2, yTopY, zHi,    // 3
+          +gw/2, yMidY, zHi,    // 4
+          +gw/2, yMidY, zLo,    // 5
+        ]);
+        // Triangles avec winding cohérent
+        // Pour normale extérieure, vue depuis l'extérieur, les sommets vont
+        // anti-horaire.
+        const idx = sgnZ > 0 ? [
+          // Plan triangulaire X- (normale vers -X)
+          0, 2, 1,
+          // Plan triangulaire X+ (normale vers +X)
+          3, 4, 5,
+          // Pan oblique 45° entre P0(top) et P2(bot lo), des 2 côtés.
+          // Vu depuis l'EXTÉRIEUR (côté +Z, donc regard vers -Z) :
+          // sommets devant nous = 0 (haut gauche), 3 (haut droit), 5 (bas droit), 2 (bas gauche)
+          // Anti-horaire vu de +Z : 0 → 2 → 5 → 3 → 0
+          0, 2, 5,  0, 5, 3,
+        ] : [
+          // sgnZ=-1, vu de l'autre côté, on inverse les windings.
+          0, 1, 2,
+          3, 5, 4,
+          0, 3, 5,  0, 5, 2,
+        ];
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+        geo.setIndex(idx);
+        geo.computeVertexNormals();
+        const m = new THREE.Mesh(geo, mat(ABUS));
+        g.add(m);
+      });
+    }
   } else {
     // ── SUSPENDU : box rectangulaire avec dépassement 300 mm de chaque côté
     const caisson = box(gw, gh, span + 2*SUSP_OVER, ABUS);
@@ -2301,16 +2331,20 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const stickW = Math.min(span*0.10, gh*2.2);
   const stickH = gh*0.45;
   (function(){
+    // Le canvas doit avoir le MÊME ratio L/H que le sticker mesh pour éviter
+    // un étirement du texte. Ici le mesh fait ~4.9:1, donc canvas 1024×210.
     const cnv = document.createElement('canvas');
-    cnv.width = 512; cnv.height = 256;          // ratio 2:1, plus carré
+    cnv.width = 1024; cnv.height = 210;
     const ctx = cnv.getContext('2d');
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, 512, 256);
+    ctx.fillRect(0, 0, 1024, 210);
     ctx.fillStyle = '#1f6cb5';
-    ctx.font = '900 200px Arial,Helvetica,sans-serif';  // 900 = Black, plus gras que bold
+    // Police calibrée pour rester DANS le canvas avec marges :
+    // "ABUS" en 900 à ~150px fait ~520px de large → 250px de marge de chaque côté.
+    ctx.font = '900 150px Arial,Helvetica,sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('ABUS', 256, 138);
+    ctx.fillText('ABUS', 512, 115);
     const tex = new THREE.CanvasTexture(cnv);
     tex.minFilter = THREE.LinearFilter;       // pas de mipmap → texte net
     tex.magFilter = THREE.LinearFilter;
@@ -2336,15 +2370,17 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     });
   })();
 
-  // ── Palan : trolley sombre + tambour gris + câbles + moufle ──────────────
-  // Suspendu SOUS la semelle inférieure du caisson (ancien modèle qui te
-  // plaisait, mais positionné dessous au lieu de dessus).
+  // ── Palan : trolley + tambour en RAL 5017 (bleu trafic) ──────────────────
+  // RAL 5017 ≈ #1f4e8c — bleu profond.
+  // Moufle et crochet en RAL 1007 (jaune narcisse) = couleur ABUS = E1A100.
+  const RAL_5017 = 0x1f4e8c;
+  const RAL_1007 = 0xE1A100;
   const yTrolley = yGird - gh*0.5 - bh*0.3;       // sous le caisson
-  const trolley = box(gw*1.6, bh*0.6, bh*1.4, DARK);
+  const trolley = box(gw*1.6, bh*0.6, bh*1.4, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(
     new THREE.CylinderGeometry(bh*0.3, bh*0.3, bh*1.0, 18),
-    mat(0x3c3f43));
+    mat(RAL_5017));
   drum.rotation.x = Math.PI/2;
   drum.position.set(0, yTrolley, 0); g.add(drum);
 
@@ -2356,11 +2392,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     cable.position.set(d*bh*0.18, dropTop - dropLen/2, 0); g.add(cable);
   });
   const blockY = dropTop - dropLen;
-  const block = box(bh*0.6, bh*0.55, bh*0.45, DARK);
+  const block = box(bh*0.6, bh*0.55, bh*0.45, RAL_1007);
   block.position.set(0, blockY, 0); g.add(block);
   const hook = new THREE.Mesh(
     new THREE.TorusGeometry(bh*0.17, bh*0.055, 8, 16, Math.PI*1.5),
-    mat(STEEL));
+    mat(RAL_1007));
   hook.position.set(0, blockY - bh*0.38, 0);
   hook.rotation.z = Math.PI*0.1;
   g.add(hook);

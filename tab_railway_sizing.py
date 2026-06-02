@@ -1887,10 +1887,10 @@ def _make_tech_extract_html(r):
         "beam_h": beam_h, "col_h": col_h, "xb_h": xb_h,
         "support_x": support_x, "crane_span": crane_span if crane_span > 0 else rail_gap,
         "is_suspendu": is_susp, "has_columns": bool(col),
-        # Cross beams UNIQUEMENT pour un pont suspendu (les voies y sont
-        # suspendues dessous). En pont posé, les voies reposent directement
-        # sur les colonnes → aucune cross beam transversale.
-        "has_crossbeam": is_susp, "has_brace": has_brace, "has_twin": has_twin,
+        # Cross beams UNIQUEMENT pour un pont suspendu AVEC portique Olsen
+        # (les voies sont suspendues sous les cross beams). En posé OU en
+        # Customer (pas de colonnes Olsen), pas de cross beam.
+        "has_crossbeam": is_susp and bool(col), "has_brace": has_brace, "has_twin": has_twin,
         "susp_overhang": susp_overhang, "L_xb": L_xb,
         "nbre_pont": nbre_pont, "carriage1": carriage1, "carriage2": carriage2,
         "space_btw": space_btw, "rv1": rv1, "rv2": rv2,
@@ -2156,12 +2156,12 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const g=new THREE.Group();
 
   // Hauteur de la poutre du pont, proportionnelle à la réaction au galet.
-  // Référence : ~180 mm pour 30 kN, +4 mm par kN supplémentaire. Bornes
-  // basses adoucies pour éviter une poutre trop haute à faible charge.
+  // Référence : ~140 mm pour 30 kN, +3 mm par kN supplémentaire. Bornes
+  // pour rester proportionné même à faible/forte charge.
   const rvEff = (rv && rv>0) ? rv : 30;
-  let gh = 180 + (rvEff-30)*4;            // mm
-  gh = Math.max(bh*0.45, Math.min(gh, bh*2.0));
-  const gw = gh*0.55;                      // largeur du caisson (sens X)
+  let gh = 140 + (rvEff-30)*3;            // mm
+  gh = Math.max(bh*0.35, Math.min(gh, bh*1.6));
+  const gw = gh*0.45;                      // largeur du caisson (sens X)
 
   const wheelR = bh*0.26;
   const somH   = bh*0.5;                   // hauteur caisson sommier (réduite)
@@ -2178,8 +2178,11 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   const ySom   = hung ? (yWheel - somH*0.5) : (yWheel + somH*0.5);
   // Bas du caisson = bas du sommier (au lieu de "posé sur le sommier")
   //   posé    : centre caisson = ySom - somH/2 + gh/2
-  //   suspendu: centre caisson = ySom + somH/2 - gh/2 (miroir)
-  const yGird  = hung ? (ySom + somH*0.5 - gh*0.5) : (ySom - somH*0.5 + gh*0.5);
+  //   suspendu: caisson DÉPASSE de 300 mm au-dessus du haut du sommier
+  //             centre caisson = ySom + somH/2 + 300 - gh/2
+  const SUSP_OVER = 300;                          // dépassement [mm]
+  const yGird  = hung ? (ySom + somH*0.5 + SUSP_OVER - gh*0.5)
+                      : (ySom - somH*0.5 + gh*0.5);
 
   // ── Sommiers + galets (un par voie) ──────────────────────────────────────
   [-1,1].forEach(s=>{
@@ -2202,48 +2205,79 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     });
   });
 
-  // ── Poutre CAISSON — chanfreins soustractifs aux extrémités ──────────────
-  // Vue de profil (plan Y-Z) la section longitudinale du caisson est un
-  // HEXAGONE : rectangle dont les 2 coins supérieurs sont coupés à 45°.
-  // Le coin coupé démarre au-dessus du sommier (sa base) et finit au sommet
-  // du caisson à `ch45` mm vers l'intérieur.
+  // ── Poutre CAISSON ──────────────────────────────────────────────────────
   //
-  // En extrudant cette section selon X (largeur du caisson = gw), on obtient
-  // le caisson complet avec ses chanfreins « coin coupé » comme sur ABUS.
-  const ch45 = gh - somH;                      // hauteur de chanfrein = au-dessus du sommier
-  const halfZ = span * 0.5;
-  const sec = new THREE.Shape();
-  // Tracé du contour hexagonal (sens horaire dans plan X=hauteur Y, Y=long Z)
-  // - on trace dans le repère (Y, Z) : 1er coord = hauteur, 2e = position en Z
-  // - Three.js Shape utilise (x, y) — on mappe x=Y, y=Z, puis on rotate après
-  sec.moveTo(-gh/2, -halfZ);                       // bas-gauche
-  sec.lineTo(-gh/2, +halfZ);                       // bas-droite (bas du caisson)
-  sec.lineTo(+gh/2, +halfZ - (ch45>0 ? ch45 : 0)); // remonte côté droite avec chanfrein
-  sec.lineTo(+gh/2, -halfZ + (ch45>0 ? ch45 : 0)); // sommet du caisson
-  sec.lineTo(-gh/2, -halfZ);                       // retour bas-gauche
-  const caissonGeo = new THREE.ExtrudeGeometry(sec, {
-    depth: gw, bevelEnabled: false, steps: 1,
-  });
-  // ExtrudeGeometry extrude selon Z. On veut une extrusion selon X (largeur
-  // du caisson). On centre puis on rotate :
-  caissonGeo.translate(0, 0, -gw/2);
-  // Notre shape est dans le plan (Y, Z) — interpreted comme (Three-X, Three-Y)
-  // par Three.js. Le résultat 3D : x_three = our_Y, y_three = our_Z,
-  // z_three = extrusion direction. On veut :
-  //   our_Y (hauteur) → Three-Y
-  //   our_Z (long span) → Three-Z
-  //   extrusion (gw, largeur) → Three-X
-  // Donc on permute axes : x_three ↔ y_three (rotation Z=-90°) puis
-  // y_three ↔ z_three (rotation X=-90°). Plus simple : rotation X de -π/2
-  // pour basculer (Y, Z) du plan original vers (Y, Z) attendus, puis Z=-π/2
-  // pour orienter l'extrusion vers X.
-  // En fait il est plus simple d'utiliser computeBoundingBox et de positionner
-  // par essai. Ici on applique : rotation Y=π/2 (extrusion bascule vers X),
-  // puis rotation Z=π/2 (swap X↔Y dans le plan).
-  caissonGeo.rotateY(Math.PI/2);
-  caissonGeo.rotateZ(Math.PI/2);
-  const caisson = new THREE.Mesh(caissonGeo, mat(ABUS));
-  caisson.position.set(0, yGird, 0); g.add(caisson);
+  // POSÉ : caisson TRAPÉZOÏDAL vu de FACE (regard parallèle à la voie ;
+  //   on voit la portée du pont devant nous). Section dans plan X-Y :
+  //
+  //          ┌─────────┐                ← haut    (y = +gh/2, x = ±(gw/2-ch45))
+  //         ╱           ╲
+  //        ╱             ╲              ← chanfrein 45° (x grandit en descendant)
+  //       │               │             ← arête latérale verticale
+  //       │               │
+  //       │               │
+  //       └───────────────┘             ← bas     (y = -gh/2, x = ±gw/2)
+  //
+  //   Longueur = span (d'un sommier à l'autre, le caisson s'arrête aux sommiers).
+  //   ch45 = partie de caisson qui dépasse le sommier (= gh − somH).
+  //
+  // SUSPENDU : caisson rectangulaire, sans chanfreins. Dépassement 300 mm
+  //   de chaque côté → longueur = span + 600.
+  if (!hung) {
+    // ── POSÉ : trapèze vu de face ─────────────────────────────────────────
+    // Clamp : le chanfrein ne peut pas dépasser la demi-largeur du caisson
+    // (sinon le trapèze "se croise" et le sommet supérieur disparaît).
+    const ch45 = Math.max(0, Math.min(gh - somH, gw * 0.45));
+    const halfZ = span * 0.5;
+    const yTop = +gh/2, yBot = -gh/2;
+    const xTopL = -(gw/2 - ch45), xTopR = +(gw/2 - ch45);  // arête sup
+    const xBotL = -gw/2,          xBotR = +gw/2;           // arête inf
+    // 8 sommets : 4 sur la face avant (z = +halfZ), 4 sur la face arrière (z = -halfZ).
+    // Face avant (vue de face, devant l'observateur) :
+    //   2 ─── 3          ← top (avant)
+    //  ╱       ╲
+    // 0 ─────── 1        ← bottom (avant)
+    // Face arrière (derrière) :
+    //   6 ─── 7
+    //  ╱       ╲
+    // 4 ─────── 5
+    const verts = new Float32Array([
+      // avant (z = +halfZ)
+      xBotL, yBot, +halfZ,   // 0
+      xBotR, yBot, +halfZ,   // 1
+      xTopL, yTop, +halfZ,   // 2
+      xTopR, yTop, +halfZ,   // 3
+      // arrière (z = -halfZ)
+      xBotL, yBot, -halfZ,   // 4
+      xBotR, yBot, -halfZ,   // 5
+      xTopL, yTop, -halfZ,   // 6
+      xTopR, yTop, -halfZ,   // 7
+    ]);
+    const indices = [
+      // Face avant (z = +halfZ) : trapèze 0-1-3-2
+      0, 1, 3,   0, 3, 2,
+      // Face arrière (z = -halfZ) : trapèze 5-4-6-7 (sens inverse pour normale arrière)
+      5, 4, 6,   5, 6, 7,
+      // Face basse (y = yBot)
+      0, 4, 5,   0, 5, 1,
+      // Face haute (y = yTop)
+      2, 3, 7,   2, 7, 6,
+      // Chanfrein gauche (entre 0 et 2 à l'avant, entre 4 et 6 à l'arrière)
+      0, 2, 6,   0, 6, 4,
+      // Chanfrein droit (entre 1 et 3 à l'avant, entre 5 et 7 à l'arrière)
+      1, 5, 7,   1, 7, 3,
+    ];
+    const caissonGeo = new THREE.BufferGeometry();
+    caissonGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    caissonGeo.setIndex(indices);
+    caissonGeo.computeVertexNormals();
+    const caisson = new THREE.Mesh(caissonGeo, mat(ABUS));
+    caisson.position.set(0, yGird, 0); g.add(caisson);
+  } else {
+    // ── SUSPENDU : box rectangulaire avec dépassement 300 mm de chaque côté
+    const caisson = box(gw, gh, span + 2*SUSP_OVER, ABUS);
+    caisson.position.set(0, yGird, 0); g.add(caisson);
+  }
 
   // ── Sticker ABUS — texture canvas (texte bleu sur fond blanc) ────────────
   // Trois.js ne dessine pas de texte directement : on génère une CanvasTexture

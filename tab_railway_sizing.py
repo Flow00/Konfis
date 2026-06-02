@@ -2214,65 +2214,67 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
 
   // ── Poutre CAISSON ──────────────────────────────────────────────────────
   //
-  // POSÉ : caisson TRAPÉZOÏDAL vu de FACE (regard parallèle à la voie ;
-  //   on voit la portée du pont devant nous). Section dans plan X-Y :
+  // POSÉ : caisson HEXAGONAL vu de PROFIL (regard parallèle à X = sens
+  //   du roulement). Section dans plan Y-Z :
   //
-  //          ┌─────────┐                ← haut    (y = +gh/2, x = ±(gw/2-ch45))
-  //         ╱           ╲
-  //        ╱             ╲              ← chanfrein 45° (x grandit en descendant)
-  //       │               │             ← arête latérale verticale
-  //       │               │
-  //       │               │
-  //       └───────────────┘             ← bas     (y = -gh/2, x = ±gw/2)
+  //         4 ──────────── 5            ← arête supérieure (yTop), raccourcie en Z
+  //        ╱                ╲
+  //       2                  3          ← début des chanfreins 45° (yMid = yTop - ch45)
+  //       │                  │
+  //       │                  │
+  //       0 ──────────────── 1          ← arête inférieure (yBot)
+  //         ←──── span ────→
   //
-  //   Longueur = span (d'un sommier à l'autre, le caisson s'arrête aux sommiers).
-  //   ch45 = partie de caisson qui dépasse le sommier (= gh − somH).
+  //   Extrudé selon X sur la largeur du caisson (gw).
+  //   Donc vu de face (regard parallèle à Z), c'est un rectangle plein gw×gh.
+  //   Vu de profil (regard parallèle à X), c'est l'hexagone ci-dessus.
+  //   ch45 = partie qui dépasse le sommier (= gh − somH), clampée.
   //
   // SUSPENDU : caisson rectangulaire, sans chanfreins. Dépassement 300 mm
   //   de chaque côté → longueur = span + 600.
   if (!hung) {
-    // ── POSÉ : trapèze vu de face ─────────────────────────────────────────
-    // Clamp : le chanfrein occupe au plus 30 % de la demi-largeur du caisson,
-    // pour garder une "casquette" plate sur le dessus (sinon trapèze trop pointu).
-    const ch45 = Math.max(0, Math.min(gh - somH, gw * 0.3));
+    // Clamp : ch45 ≤ 30% du demi-span pour éviter un hexagone trop pointu
+    // (sinon la face supérieure disparaît sur les petites portées).
+    const ch45 = Math.max(0, Math.min(gh - somH, span * 0.15));
     const halfZ = span * 0.5;
     const yTop = +gh/2, yBot = -gh/2;
-    const xTopL = -(gw/2 - ch45), xTopR = +(gw/2 - ch45);  // arête sup
-    const xBotL = -gw/2,          xBotR = +gw/2;           // arête inf
-    // 8 sommets : 4 sur la face avant (z = +halfZ), 4 sur la face arrière (z = -halfZ).
-    // Face avant (vue de face, devant l'observateur) :
-    //   2 ─── 3          ← top (avant)
-    //  ╱       ╲
-    // 0 ─────── 1        ← bottom (avant)
-    // Face arrière (derrière) :
-    //   6 ─── 7
-    //  ╱       ╲
-    // 4 ─────── 5
+    const yMid = yTop - ch45;
+    const xL = -gw/2, xR = +gw/2;
+    // 12 sommets : 6 sur le flanc gauche (x=xL), 6 sur le flanc droit (x=xR).
     const verts = new Float32Array([
-      // avant (z = +halfZ)
-      xBotL, yBot, +halfZ,   // 0
-      xBotR, yBot, +halfZ,   // 1
-      xTopL, yTop, +halfZ,   // 2
-      xTopR, yTop, +halfZ,   // 3
-      // arrière (z = -halfZ)
-      xBotL, yBot, -halfZ,   // 4
-      xBotR, yBot, -halfZ,   // 5
-      xTopL, yTop, -halfZ,   // 6
-      xTopR, yTop, -halfZ,   // 7
+      // flanc gauche (x = xL)
+      xL, yBot, -halfZ,         // 0 — bas-arrière
+      xL, yBot, +halfZ,         // 1 — bas-avant
+      xL, yMid, -halfZ,         // 2 — début chanfrein arrière
+      xL, yMid, +halfZ,         // 3 — début chanfrein avant
+      xL, yTop, -halfZ + ch45,  // 4 — sommet arrière (après chanfrein)
+      xL, yTop, +halfZ - ch45,  // 5 — sommet avant
+      // flanc droit (x = xR)
+      xR, yBot, -halfZ,         // 6
+      xR, yBot, +halfZ,         // 7
+      xR, yMid, -halfZ,         // 8
+      xR, yMid, +halfZ,         // 9
+      xR, yTop, -halfZ + ch45,  // 10
+      xR, yTop, +halfZ - ch45,  // 11
     ]);
+    // Triangles (sens trigo, normale vers l'extérieur).
     const indices = [
-      // Face avant (z = +halfZ) : trapèze 0-1-3-2
-      0, 1, 3,   0, 3, 2,
-      // Face arrière (z = -halfZ) : trapèze 5-4-6-7 (sens inverse pour normale arrière)
-      5, 4, 6,   5, 6, 7,
-      // Face basse (y = yBot)
-      0, 4, 5,   0, 5, 1,
-      // Face haute (y = yTop)
-      2, 3, 7,   2, 7, 6,
-      // Chanfrein gauche (entre 0 et 2 à l'avant, entre 4 et 6 à l'arrière)
-      0, 2, 6,   0, 6, 4,
-      // Chanfrein droit (entre 1 et 3 à l'avant, entre 5 et 7 à l'arrière)
-      1, 5, 7,   1, 7, 3,
+      // Face gauche (x = xL, hexagone) : 0-1-3-5-4-2 — normale vers -X
+      0, 3, 1,  0, 5, 3,  0, 4, 5,  0, 2, 4,
+      // Face droite (x = xR, hexagone) : 6-8-10-11-9-7 — normale vers +X
+      6, 7, 9,  6, 9, 11, 6, 11, 10, 6, 10, 8,
+      // Face basse (y = yBot, entre 0-1 et 6-7) — normale vers -Y
+      0, 1, 7,  0, 7, 6,
+      // Face avant pleine hauteur (z = +halfZ, entre 1-3 et 7-9) — normale +Z
+      1, 3, 9,  1, 9, 7,
+      // Chanfrein avant (de yMid à yTop incliné vers Z=−ch45) — normale (+Y, +Z)
+      3, 5, 11, 3, 11, 9,
+      // Face supérieure (z entre −halfZ+ch45 et +halfZ−ch45, y = yTop) — normale +Y
+      5, 4, 10, 5, 10, 11,
+      // Chanfrein arrière (de yTop à yMid incliné vers Z=−halfZ) — normale (+Y, −Z)
+      4, 2, 8,  4, 8, 10,
+      // Face arrière pleine hauteur (z = −halfZ, entre 2-0 et 8-6) — normale −Z
+      2, 0, 6,  2, 6, 8,
     ];
     const caissonGeo = new THREE.BufferGeometry();
     caissonGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));

@@ -409,6 +409,43 @@ def do_add_article(
 ):
     models_proxy = xmlrpc.client.ServerProxy(models_url)
 
+    # ── Sanitize None values ─────────────────────────────────────────────────
+    # XMLRPC ne peut pas sérialiser None (sauf si allow_none=True). On coerce
+    # les valeurs str-like vers "", les int-like vers 0, et categ_id (un id
+    # Odoo) vers False (équivalent Odoo de "pas de valeur").
+    def _s(v):   # str or ""
+        return v if isinstance(v, str) else ("" if v is None else str(v))
+    def _i(v):   # int or 0
+        return 0 if v is None else v
+    name          = _s(name)
+    reference     = _s(reference)
+    category      = _s(category)
+    product       = _s(product)
+    supplier      = _s(supplier)
+    purchase_ref  = _s(purchase_ref)
+    sale_desc     = _s(sale_desc)
+    purchase_desc = _s(purchase_desc)
+    project       = _s(project)
+    tech_text     = _s(tech_text)
+    user_name     = _s(user_name)
+    user_address  = _s(user_address)
+    # IDs Odoo : si None ou 0, on passe False (Odoo accepte False pour "vide")
+    categ_id      = categ_id if categ_id else False
+    supplier_id   = supplier_id if supplier_id else False
+    if not reference:
+        st.error("❌ Référence manquante : impossible de créer le produit.")
+        return
+    if not name:
+        st.error("❌ Nom produit manquant : impossible de créer le produit.")
+        return
+    if not categ_id:
+        st.error(
+            "❌ Catégorie Odoo introuvable pour cette combinaison "
+            f"(supplier={supplier!r}, product={product!r}). "
+            "Le produit ne peut pas être créé sans catégorie."
+        )
+        return
+
     # ── duplicate check ──────────────────────────────────────────────────────
     existing = models_proxy.execute_kw(
         db_name, uid, password,
@@ -1076,7 +1113,9 @@ def render_add_article_tab(db_name, models_url, debug=False):
             )
         else:
             _lnet = "Net price [€] ❌" if ("prix" in ps_errs and not gross_price) else "Net price [€]"
-            net_price = _num_input(_lnet, key=net_key_man, disabled=is_olsen_bel)
+            # Garde is_olsen_bel volontairement retirée : un employé OLSEN LIG/BEL
+            # doit pouvoir saisir le prix net manuellement (demande utilisateur).
+            net_price = _num_input(_lnet, key=net_key_man)
     with pc6:
         _ldelay = "Delay [j] ❌" if "délai" in ps_errs else "Delay [j]"
         delay = _int_input(_ldelay, key=delay_key, disabled=is_olsen_bel)

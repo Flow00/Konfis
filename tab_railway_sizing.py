@@ -2291,19 +2291,20 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // ── Sticker ABUS — texture canvas (texte bleu sur fond blanc) ────────────
   // Trois.js ne dessine pas de texte directement : on génère une CanvasTexture
   // côté navigateur, qu'on plaque ensuite comme texture sur 2 plans.
-  const stickW = Math.min(span*0.18, gh*4);
-  const stickH = gh*0.32;
+  // Ratio L/H plus carré (~2:1 au lieu de ~3:1).
+  const stickW = Math.min(span*0.10, gh*2.2);
+  const stickH = gh*0.45;
   (function(){
     const cnv = document.createElement('canvas');
-    cnv.width = 1024; cnv.height = 384;
+    cnv.width = 512; cnv.height = 256;          // ratio 2:1, plus carré
     const ctx = cnv.getContext('2d');
     ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, 1024, 384);
+    ctx.fillRect(0, 0, 512, 256);
     ctx.fillStyle = '#1f6cb5';
-    ctx.font = 'bold 280px Arial,sans-serif';
+    ctx.font = '900 200px Arial,Helvetica,sans-serif';  // 900 = Black, plus gras que bold
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('ABUS', 512, 200);
+    ctx.fillText('ABUS', 256, 138);
     const tex = new THREE.CanvasTexture(cnv);
     tex.minFilter = THREE.LinearFilter;       // pas de mipmap → texte net
     tex.magFilter = THREE.LinearFilter;
@@ -2312,18 +2313,18 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     const stickMat = new THREE.MeshBasicMaterial({
       map: tex, side: THREE.DoubleSide,
     });
+    // Écartement du plan vs surface caisson : assez grand pour éviter le
+    // z-fighting (le moteur 3D hésite entre 2 surfaces coplanaires → flicker).
+    const stickOff = Math.max(gh*0.02, 5);     // écartement [mm], min 5 mm
     [+1,-1].forEach(sgn=>{
       const plane = new THREE.Mesh(
         new THREE.PlaneGeometry(stickW, stickH), stickMat);
-      // Le plan doit être collé contre le flanc latéral du caisson, donc
-      // perpendiculaire à X. On le pose à x = ±gw/2 (juste à la surface du
-      // caisson), centré verticalement, et on le tourne pour que la normale
-      // soit ±X.
-      plane.position.set(sgn*(gw*0.5 + 1), yGird, 0);
+      // Plan collé contre le flanc latéral du caisson, écarté de stickOff
+      // pour éviter le flicker (z-fighting avec la surface du caisson).
+      plane.position.set(sgn*(gw*0.5 + stickOff), yGird, 0);
       // PlaneGeometry par défaut est dans le plan X-Y (normale = Z).
-      // Pour le coller en X = +gw/2 (sticker visible depuis +X), il faut
-      // tourner pour que la normale aille vers +X, donc rotation Y = +π/2.
-      // Pour x = -gw/2 (visible depuis -X), normale vers -X, rotation Y = -π/2.
+      // Pour x = +gw/2 (sticker visible depuis +X), normale vers +X → rot Y = +π/2.
+      // Pour x = -gw/2 (visible depuis -X), normale vers -X → rot Y = -π/2.
       plane.rotation.y = sgn > 0 ? Math.PI/2 : -Math.PI/2;
       g.add(plane);
     });

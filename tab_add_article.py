@@ -177,9 +177,22 @@ def get_detailed_type(input_product_name):
     return "consu"
 
 def get_article_category(article_table, supplier, product, type_):
+    # Normaliser : None / "" / False traités comme "pas de type"
+    def _norm_type(t):
+        return "" if t in (None, False, "") else str(t).strip()
+    t_target = _norm_type(type_)
+    # 1) Match exact (supplier, product, type_) avec normalisation
     for row in article_table:
-        if row[0] == supplier and row[1] == product and row[2] == type_:
+        if row[0] == supplier and row[1] == product and _norm_type(row[2]) == t_target:
             return row[3]
+    # 2) Fallback : si type_ cible est vide, accepter la première entrée
+    # matchant (supplier, product) quel que soit son type. Utile pour le
+    # bouton "To Add articles" depuis Railway Sizing où le type n'est pas
+    # connu.
+    if not t_target:
+        for row in article_table:
+            if row[0] == supplier and row[1] == product:
+                return row[3]
     return None
 
 def compute_discounts(category, product, type_):
@@ -439,12 +452,15 @@ def do_add_article(
         st.error("❌ Nom produit manquant : impossible de créer le produit.")
         return
     if not categ_id:
-        st.error(
-            "❌ Catégorie Odoo introuvable pour cette combinaison "
-            f"(supplier={supplier!r}, product={product!r}). "
-            "Le produit ne peut pas être créé sans catégorie."
+        # On ne bloque PAS la création — Odoo accepte False pour "catégorie
+        # non définie", et la combinaison (supplier, product) peut légitimement
+        # ne pas être dans le mapping article_table (cas du bouton "To Add
+        # articles" depuis Railway Sizing pour un produit construit).
+        st.warning(
+            f"⚠️ Catégorie Odoo non trouvée pour (supplier={supplier!r}, "
+            f"product={product!r}). Le produit sera créé sans catégorie ; "
+            "à compléter manuellement dans Odoo si besoin."
         )
-        return
 
     # ── duplicate check ──────────────────────────────────────────────────────
     existing = models_proxy.execute_kw(

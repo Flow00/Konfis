@@ -2171,12 +2171,15 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
 
   // ── Empilement vertical à partir du contact galet/rail ───────────────────
   // Posé    : galet SUR le rail → centre galet = yRailTop + wheelR.
-  //           sommier au-dessus des galets, poutre au-dessus du sommier.
-  // Suspendu: galet sous la voie → centre galet = yRailTop - wheelR ; sommier
-  //           dessous, poutre encore dessous.
+  //           sommier au-dessus des galets, le CAISSON PLONGE DANS LE SOMMIER
+  //           → bas du caisson aligné avec bas du sommier.
+  // Suspendu: galet sous la voie, miroir vertical.
   const yWheel = hung ? (yRailTop - wheelR) : (yRailTop + wheelR);
   const ySom   = hung ? (yWheel - somH*0.5) : (yWheel + somH*0.5);
-  const yGird  = hung ? (ySom - somH*0.5 - gh*0.5) : (ySom + somH*0.5 + gh*0.5);
+  // Bas du caisson = bas du sommier (au lieu de "posé sur le sommier")
+  //   posé    : centre caisson = ySom - somH/2 + gh/2
+  //   suspendu: centre caisson = ySom + somH/2 - gh/2 (miroir)
+  const yGird  = hung ? (ySom + somH*0.5 - gh*0.5) : (ySom - somH*0.5 + gh*0.5);
 
   // ── Sommiers + galets (un par voie) ──────────────────────────────────────
   [-1,1].forEach(s=>{
@@ -2199,69 +2202,152 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     });
   });
 
-  // ── Poutre CAISSON (box girder) — section pentagonale type ABUS ──────────
-  // Section : rectangle avec les 2 arêtes supérieures coupées à 45° (pan
-  // coupé). Réalisé via ExtrudeGeometry depuis un Shape 2D, extrudé sur
-  // toute la portée (le long de Z).
-  const chamf = gh*0.18;                       // largeur du chanfrein 45°
-  const sec = new THREE.Shape();
-  // Tracé de la section (dans le plan X-Y) — pentagone :
-  //   bas gauche → haut gauche (avant chanfrein) → sommet gauche du chanfrein
-  //   → sommet droit du chanfrein → haut droit (avant chanfrein) → bas droit
-  sec.moveTo(-gw/2, -gh/2);
-  sec.lineTo(-gw/2,  gh/2 - chamf);
-  sec.lineTo(-gw/2 + chamf,  gh/2);
-  sec.lineTo( gw/2 - chamf,  gh/2);
-  sec.lineTo( gw/2, gh/2 - chamf);
-  sec.lineTo( gw/2, -gh/2);
-  sec.lineTo(-gw/2, -gh/2);
-  const caissonGeo = new THREE.ExtrudeGeometry(sec, {
-    depth: span, bevelEnabled: false, steps: 1,
-  });
-  caissonGeo.translate(0, 0, -span/2);          // recentrer en Z
-  const caisson = new THREE.Mesh(caissonGeo, mat(ABUS));
-  caisson.position.set(0, yGird, 0);
-  g.add(caisson);
+  // ── Poutre CAISSON (box girder) — volume plein rectangulaire ─────────────
+  // Le caisson est un parallélépipède jaune ABUS, qui PLONGE dans le sommier.
+  // Sa longueur en Z est légèrement réduite pour rester entre les sommiers
+  // (les chanfreins triangulaires y feront la transition).
+  const somHalf = somL*0.5;                    // demi-longueur du sommier (en X)
+  const caissonZ = span - somW*0.6;            // longueur Z du caisson
+                                               // (on s'arrête juste avant les sommiers)
+  const caisson = box(gw, gh, caissonZ, ABUS);
+  caisson.position.set(0, yGird, 0); g.add(caisson);
 
-  // ── Sticker ABUS (rectangle bleu) sur chaque flanc de la poutre ──────────
-  // Bleu ABUS ≈ #1f6cb5. Plaqué légèrement en surface du flanc latéral.
-  const stickW = Math.min(span*0.18, gh*4);     // largeur sticker
-  const stickH = gh*0.32;                       // hauteur sticker
-  const stickT = 2;                             // épaisseur (pour décollage)
-  [+1,-1].forEach(sgn=>{
-    const stick = box(stickT, stickH, stickW, 0x1f6cb5);
-    stick.position.set(sgn*(gw*0.5 + stickT*0.5), yGird, 0);
-    g.add(stick);
-    // bande blanche en bas du sticker pour le côté carré du logo
-    const band = box(stickT, stickH*0.18, stickW, 0xffffff);
-    band.position.set(sgn*(gw*0.5 + stickT*0.6),
-                      yGird - stickH*0.5 + stickH*0.09, 0);
-    g.add(band);
+  // ── Chanfreins 45° aux DEUX EXTRÉMITÉS du caisson (sens span) ────────────
+  // Le caisson plonge dans le sommier ; au-dessus du sommier, un pan incliné
+  // à 45° relie le haut du sommier au sommet du caisson. C'est l'arête courte
+  // du caisson qui est coupée en biseau.
+  // Chanfrein = triangle plat sur les 2 flancs (±X) à chaque extrémité (±Z).
+  const ch45 = gh - somH;                      // hauteur du chanfrein
+                                               // (= partie de caisson au-dessus du sommier)
+  if (ch45 > 0) {
+    [+1,-1].forEach(sgnZ=>{                    // 2 extrémités du caisson
+      // Triangle dans le plan Y-Z, plein de la largeur du caisson (X).
+      // Sommets (en Y, Z) :
+      //   - bas du caisson au niveau du sommier : (yGird - gh/2 + somH, sgnZ*caissonZ/2)
+      //   - sommet du caisson :                   (yGird + gh/2, sgnZ*caissonZ/2)
+      //   - jonction sommet vers extrémité :      (yGird + gh/2, sgnZ*(caissonZ/2 + ch45))
+      const tri = new THREE.Shape();
+      const yA = -gh/2 + somH;                 // niveau haut du sommier
+      const yB = +gh/2;                        // sommet du caisson
+      const zStart = sgnZ*caissonZ/2;
+      const zEnd   = sgnZ*(caissonZ/2 + ch45); // 45° → dZ = ch45
+      tri.moveTo(yA, zStart);
+      tri.lineTo(yB, zStart);
+      tri.lineTo(yB, zEnd);
+      tri.lineTo(yA, zStart);
+      const triGeo = new THREE.ExtrudeGeometry(tri, {
+        depth: gw, bevelEnabled: false, steps: 1,
+      });
+      // ExtrudeGeometry extrude le long de Z par défaut. Notre shape est dans
+      // le plan Y-Z, donc on doit faire une rotation pour que l'extrusion
+      // se fasse selon X (largeur du caisson).
+      // Plus simple : on construit le shape dans le plan X-Y, puis on extrude
+      // selon Z. Refaisons.
+      triGeo.dispose();
+      // (mauvaise approche, on refait avec un BufferGeometry direct)
+    });
+
+    // ── Construction des chanfreins via BufferGeometry (vertices directs) ──
+    // Pour chaque extrémité (sgnZ = ±1), on crée un prisme triangulaire
+    // dont la section triangulaire est dans le plan Y-Z et qui est extrudé
+    // sur la largeur du caisson (X).
+    [+1,-1].forEach(sgnZ=>{
+      const yA = yGird - gh/2 + somH;          // niveau du haut du sommier
+      const yB = yGird + gh/2;                 // sommet du caisson
+      const zA = sgnZ*caissonZ/2;              // jonction caisson plat → chanfrein
+      const zB = sgnZ*(caissonZ/2 + ch45);     // extrémité du chanfrein
+      const xL = -gw/2, xR = +gw/2;
+      // 6 sommets (triangle × 2 faces)
+      const verts = new Float32Array([
+        xL, yA, zA,    xL, yB, zA,    xL, yB, zB,   // face X-
+        xR, yA, zA,    xR, yB, zB,    xR, yB, zA,   // face X+
+      ]);
+      const indices = [
+        0, 1, 2,                  // tri X-
+        3, 4, 5,                  // tri X+
+        0, 3, 5,  0, 5, 1,        // face Y- (du yA jusqu'à arête supérieure)
+        1, 5, 4,  1, 4, 2,        // face supérieure (sur le pan incliné)
+        // pas de face Y+ (le bas du chanfrein touche le sommet du sommier)
+        0, 2, 3,  2, 4, 3,        // bouchon côté extérieur (pan zB)
+      ];
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+      geo.setIndex(indices);
+      geo.computeVertexNormals();
+      const m = new THREE.Mesh(geo, mat(ABUS));
+      g.add(m);
+    });
+  }
+
+  // ── Sticker ABUS — texture canvas (texte bleu sur fond blanc) ────────────
+  // Trois.js ne dessine pas de texte directement : on génère une CanvasTexture
+  // côté navigateur, qu'on plaque ensuite comme texture sur 2 plans.
+  const stickW = Math.min(span*0.18, gh*4);
+  const stickH = gh*0.32;
+  (function(){
+    const cnv = document.createElement('canvas');
+    cnv.width = 256; cnv.height = 96;
+    const ctx = cnv.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, 256, 96);
+    ctx.fillStyle = '#1f6cb5';
+    ctx.font = 'bold 70px Arial,sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('ABUS', 128, 50);
+    const tex = new THREE.CanvasTexture(cnv);
+    const stickMat = new THREE.MeshBasicMaterial({map: tex});
+    [+1,-1].forEach(sgn=>{
+      const plane = new THREE.Mesh(
+        new THREE.PlaneGeometry(stickW, stickH), stickMat);
+      plane.position.set(sgn*(gw*0.5 + 1), yGird, 0);
+      plane.rotation.y = sgn > 0 ? -Math.PI/2 : Math.PI/2;
+      g.add(plane);
+    });
+  })();
+
+  // ── Mini-chariot du palan SOUS la semelle inférieure du caisson ──────────
+  // Roule à la base du caisson, porte le moteur ABUS bleu, qui pend dessous.
+  // Centré le long du caisson (zc=0).
+  const trolH = bh*0.35;                       // hauteur du mini-chariot
+  const trolW = gh*1.1;                        // un peu plus large que le caisson
+  const trolD = bh*1.2;                        // profondeur (le long de Z)
+  const yTrol = yGird - gh/2 - trolH/2;        // juste sous le bas du caisson
+  const trolley = box(trolW, trolH, trolD, ABUS_D);
+  trolley.position.set(0, yTrol, 0); g.add(trolley);
+
+  // ── Moteur palan ABUS — cylindre bleu suspendu sous le mini-chariot ──────
+  const ABUS_BLUE = 0x1f6cb5;
+  const motorR = bh*0.45;
+  const motorL = bh*1.6;                       // longueur axe du moteur
+  const yMot = yTrol - trolH/2 - motorR;       // sous le chariot
+  const motor = new THREE.Mesh(
+    new THREE.CylinderGeometry(motorR, motorR, motorL, 24),
+    mat(ABUS_BLUE));
+  motor.rotation.z = Math.PI/2;                // axe horizontal le long de X
+  motor.position.set(0, yMot, 0); g.add(motor);
+  // Petits flasques aux extrémités du moteur (gris foncé)
+  [+1,-1].forEach(s=>{
+    const cap = new THREE.Mesh(
+      new THREE.CylinderGeometry(motorR*1.04, motorR*1.04, motorR*0.18, 24),
+      mat(DARK));
+    cap.rotation.z = Math.PI/2;
+    cap.position.set(s*(motorL/2 + motorR*0.09), yMot, 0); g.add(cap);
   });
 
-  // ── Chariot (trolley) + treuil sur le dessus de la poutre ────────────────
-  // Centré sur le caisson (zc = 0) pour que le palan tombe pile au milieu.
-  const yTrolley = yGird + (hung ? -gh*0.5 - bh*0.3 : gh*0.5 + bh*0.3);
-  const trolley=box(gw*1.6, bh*0.6, bh*1.4, DARK);
-  trolley.position.set(0, yTrolley, 0); g.add(trolley);
-  const drum=new THREE.Mesh(new THREE.CylinderGeometry(bh*0.3,bh*0.3,bh*1.0,18),mat(0x3c3f43));
-  drum.rotation.x=Math.PI/2; drum.position.set(0, yTrolley, 0); g.add(drum);
-
-  // ── Palan : câbles + moufle + crochet (pend toujours VERS LE BAS) ────────
-  // Posé    : démarre nettement SOUS le bas du caisson pour que le palan soit
-  //           clairement détaché de la poutre du pont.
-  // Suspendu: idem.
-  const dropTop = (yGird - gh*0.5) - bh*0.4;      // gap visible sous le caisson
-  const dropLen = Math.max(bh*3.5, gh*2.2), zc = 0;
-  [-1,1].forEach(d=>{
-    const cable=box(bh*0.05, dropLen, bh*0.05, BLACK);
-    cable.position.set(d*bh*0.18, dropTop - dropLen/2, zc); g.add(cable);
-  });
-  const blockY=dropTop - dropLen;
-  const block=box(bh*0.6, bh*0.55, bh*0.45, DARK);   // moufle foncée (≠ jaune poutre)
-  block.position.set(0, blockY, zc); g.add(block);
-  const hook=new THREE.Mesh(new THREE.TorusGeometry(bh*0.17,bh*0.055,8,16,Math.PI*1.5),mat(STEEL));
-  hook.position.set(0, blockY - bh*0.38, zc); hook.rotation.z=Math.PI*0.1; g.add(hook);
+  // ── Crochet + moufle qui pend sous le moteur ─────────────────────────────
+  const dropLen = Math.max(bh*2.5, gh*1.8);
+  const cable = box(bh*0.06, dropLen, bh*0.06, BLACK);
+  cable.position.set(0, yMot - motorR - dropLen/2, 0); g.add(cable);
+  const blockY = yMot - motorR - dropLen;
+  const block = box(bh*0.55, bh*0.45, bh*0.4, ABUS_BLUE);
+  block.position.set(0, blockY, 0); g.add(block);
+  const hook = new THREE.Mesh(
+    new THREE.TorusGeometry(bh*0.18, bh*0.06, 8, 16, Math.PI*1.5),
+    mat(STEEL));
+  hook.position.set(0, blockY - bh*0.4, 0);
+  hook.rotation.z = Math.PI*0.1;
+  g.add(hook);
 
   g.position.x = xc||0;
   return g;

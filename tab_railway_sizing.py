@@ -2257,69 +2257,88 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
       hiBox.position.set(0, yGird + yHi, 0); g.add(hiBox);
 
       // 2 prismes triangulaires aux extrémités (transition 45°)
-      // Vu de profil (plan Y-Z), section triangulaire :
-      //   sommet haut au début de la partie haute (z = ±lenHi/2, y = yMid)
-      //   2 sommets bas : (z = ±lenLow/2, y = yMid) et (z = ±lenHi/2, y = yMid)
-      // Wait : il faut un triangle 45° qui descend de la partie haute à la partie basse.
-      // Triangle au bout +Z : sommets (en Y-Z) :
-      //   A = (yMid, +lenHi/2)  ← début de la partie haute, en haut
-      //   B = (yMid, +lenLow/2) ← fin de la partie basse, au niveau yMid
-      //   C = (yMid - ch45, +lenHi/2) ?  
-      // En fait pour avoir 45°, le triangle est rectangle :
-      //   A = sommet du caisson, fin de la partie haute = (yTop, +lenHi/2)
-      //   Mais yTop est au niveau de la partie haute, et la transition descend.
-      // Plus simple : triangle dont les 3 sommets sont :
-      //   A = (+lenHi/2, yMid+ch45) sur la partie haute, dessus
-      //   B = (+lenLow/2, yMid) en bas du chanfrein
-      //   C = (+lenHi/2, yMid) intérieur (vertical) - non visible
-      // Avec extrusion sur gw. C'est un prisme triangulaire.
+      // Géométrie du prisme côté sgnZ = +1 (le côté Z opposé est miroir) :
+      //   - Section triangulaire dans le plan Y-Z :
+      //       P0 = (yTop, zHi)  ← sommet haut, lié au coin de la box haute
+      //       P1 = (yMid, zHi)  ← coin intérieur (caché)
+      //       P2 = (yMid, zLo)  ← coin extérieur, lié à la fin de la box basse
+      //   - Extrudé sur l'épaisseur gw du caisson (en X).
+      //
+      //   Faces visibles (4) :
+      //     • Face latérale gauche  (x = -gw/2, normale = -X)
+      //     • Face latérale droite  (x = +gw/2, normale = +X)
+      //     • Pan oblique 45°       (normale = (+Y, +Z·sgnZ))
+      //     • Face inférieure       (y = yMid, normale = -Y)
+      //   (La face P0-P1 verticale, normale vers l'intérieur, n'est pas
+      //   rendue car cachée par la box haute → on l'omet pour éviter les
+      //   artefacts visuels.)
       const yMidY = yGird + (+gh/2 - ch45);      // niveau de la transition
       const yTopY = yGird + (+gh/2);             // sommet du caisson
       [+1, -1].forEach(sgnZ=>{
-        // Sommets du prisme (6 sommets : triangle × 2 plans X = ±gw/2)
         const zHi = sgnZ * lenHi/2;              // côté intérieur (lié à la box haute)
         const zLo = sgnZ * lenLow/2;             // côté extérieur (lié à la box basse)
-        // Triangle vu en Y-Z :
-        //   P0 = (yTopY, zHi)  sommet, lié à l'angle supérieur de la box haute
-        //   P1 = (yMidY, zHi)  intérieur (caché, dans la box)
-        //   P2 = (yMidY, zLo)  bas du chanfrein, lié à la box basse
+        // 6 sommets : triangle × 2 plans X.
+        // Indices : 0,1,2 = flanc x=-gw/2 ; 3,4,5 = flanc x=+gw/2.
+        // 0=P0, 1=P1, 2=P2 sur le flanc gauche ; 3=P0, 4=P1, 5=P2 sur droite.
         const verts = new Float32Array([
-          -gw/2, yTopY, zHi,    // 0  gauche-haut
-          -gw/2, yMidY, zHi,    // 1  gauche-intérieur
-          -gw/2, yMidY, zLo,    // 2  gauche-extérieur
-          +gw/2, yTopY, zHi,    // 3
-          +gw/2, yMidY, zHi,    // 4
-          +gw/2, yMidY, zLo,    // 5
+          -gw/2, yTopY, zHi,    // 0 P0 gauche-haut-INT
+          -gw/2, yMidY, zHi,    // 1 P1 gauche-bas-INT
+          -gw/2, yMidY, zLo,    // 2 P2 gauche-bas-EXT
+          +gw/2, yTopY, zHi,    // 3 P0 droite-haut-INT
+          +gw/2, yMidY, zHi,    // 4 P1 droite-bas-INT
+          +gw/2, yMidY, zLo,    // 5 P2 droite-bas-EXT
         ]);
-        // Triangles avec winding cohérent
-        // Pour normale extérieure, vue depuis l'extérieur, les sommets vont
-        // anti-horaire.
+        // Triangles avec winding correct (anti-horaire vu depuis l'extérieur).
+        // Convention : (A, B, C) où (B-A)×(C-A) pointe vers l'extérieur.
+        //
+        // Face gauche (x=-gw/2, normale=-X) : vue depuis -X (regard vers +X),
+        // les axes Y monte, Z augmente avec sgnZ. Anti-horaire vu de -X :
+        //   sgnZ=+1 : P0(top,zHi) → P1(mid,zHi) → P2(mid,zLo) → P0 — horaire si zHi<zLo
+        //   Plus simple : tester et inverser si besoin.
+        // Pour sgnZ=+1, zLo > zHi (P2 plus loin que P1 en Z+).
+        // Vu de -X : Z vers gauche, Y vers haut. P0 haut-droite, P1 bas-droite,
+        // P2 bas-extrême-droite. Sens trigo (anti-horaire) : P0→P1→P2.
+        // Donc (0,1,2) — mais c'est seulement vrai si sgnZ=+1 (P2 à droite de P1).
+        // Pour sgnZ=-1, P2 est à gauche de P1, donc l'ordre s'inverse → (0,2,1).
+        //
+        // Face droite (x=+gw/2, normale=+X) : miroir → (3,5,4) pour sgnZ=+1, (3,4,5) pour sgnZ=-1.
+        //
+        // Pan oblique : 4 sommets P0,P2 (gauche+droite). Normale dépend de sgnZ.
+        // Pour sgnZ=+1, le pan descend de P0(zHi=plus petit Z) à P2(zLo=plus grand Z),
+        // donc la normale a une composante +Z et +Y. Vu depuis (+Y, +Z) :
+        //   sommets ordre anti-horaire : P0_gauche(0) → P0_droite(3) → P2_droite(5) → P2_gauche(2)
+        //   Triangulé : (0,3,5) et (0,5,2)
+        // Pour sgnZ=-1, miroir → (0,2,5) et (0,5,3)
+        //
+        // Face inférieure (y=yMid, normale=-Y) : entre P1 et P2 sur les 2 flancs.
+        // P1_gauche(1), P2_gauche(2), P1_droite(4), P2_droite(5).
+        // Vu de -Y (regard vers +Y), X vers droite, Z selon sgnZ.
+        // Pour sgnZ=+1 (Z augmente vers extérieur) :
+        //   Anti-horaire vu de -Y : 1(x-,z-) → 2(x-,z+) → 5(x+,z+) → 4(x+,z-)
+        //   Triangulé : (1,2,5) et (1,5,4)
+        // Pour sgnZ=-1 (Z diminue vers extérieur) : on inverse en Z → (1,4,5) et (1,5,2)
         const idx = sgnZ > 0 ? [
-          // Plan triangulaire X- (normale vers -X)
-          0, 2, 1,
-          // Plan triangulaire X+ (normale vers +X)
-          3, 4, 5,
-          // Pan oblique 45° entre P0(top) et P2(bot lo), des 2 côtés.
-          // Vu depuis l'EXTÉRIEUR (côté +Z, donc regard vers -Z) :
-          // sommets devant nous = 0 (haut gauche), 3 (haut droit), 5 (bas droit), 2 (bas gauche)
-          // Anti-horaire vu de +Z : 0 → 2 → 5 → 3 → 0
-          0, 2, 5,  0, 5, 3,
-        ] : [
-          // sgnZ=-1, vu de l'autre côté, on inverse les windings.
+          // Face gauche (x=-gw/2, normale -X)
           0, 1, 2,
+          // Face droite (x=+gw/2, normale +X)
           3, 5, 4,
+          // Pan oblique 45° (normale (+Y, +Z))
           0, 3, 5,  0, 5, 2,
+          // Face inférieure (normale -Y)
+          1, 2, 5,  1, 5, 4,
+        ] : [
+          // sgnZ=-1 : on inverse les ordres en Z
+          0, 2, 1,
+          3, 4, 5,
+          0, 2, 5,  0, 5, 3,
+          1, 4, 5,  1, 5, 2,
         ];
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
         geo.setIndex(idx);
         geo.computeVertexNormals();
-        // DoubleSide pour s'assurer qu'aucun triangle ne soit invisible si le
-        // winding est inversé (les coins du caisson étaient creux sans ça).
-        const prismMat = new THREE.MeshLambertMaterial({
-          color: ABUS, side: THREE.DoubleSide,
-        });
-        const m = new THREE.Mesh(geo, prismMat);
+        // FrontSide (par défaut) — les windings sont maintenant corrects.
+        const m = new THREE.Mesh(geo, mat(ABUS));
         g.add(m);
       });
     }
@@ -2344,9 +2363,9 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, 1024, 210);
     ctx.fillStyle = '#1f6cb5';
-    // Police calibrée pour rester DANS le canvas avec marges :
-    // "ABUS" en 900 à ~190px fait ~700px de large → 160px de marge de chaque côté.
-    ctx.font = '900 190px Arial,Helvetica,sans-serif';
+    // Police calibrée pour occuper toute la zone blanche du canvas :
+    // "ABUS" en 900 à ~240px fait ~880px de large → 70px de marge de chaque côté.
+    ctx.font = '900 240px Arial,Helvetica,sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText('ABUS', 512, 110);
@@ -2382,14 +2401,13 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // s'il était maintenu par des galets internes) au lieu de pendre sous lui.
   const RAL_5017 = 0x1f4e8c;
   const RAL_1007 = 0xE1A100;
-  const trolH = bh*1.0;                          // hauteur du trolley (plus haut)
-  // Remonter dans le caisson : le HAUT du trolley est au niveau du bas du caisson + 30% trolH
-  // → le trolley chevauche partiellement le bas du caisson.
-  const yTrolley = yGird - gh*0.5 + trolH*0.2;   // remonté dans la poutre
+  const trolH = bh*1.4;                          // hauteur du trolley (plus haut)
+  // Remonter dans le caisson : chevauchement à moitié dans la poutre.
+  const yTrolley = yGird - gh*0.5 + trolH*0.45;  // bien remonté dans la poutre
   const trolley = box(gw*1.6, trolH, bh*1.4, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(
-    new THREE.CylinderGeometry(bh*0.35, bh*0.35, bh*1.0, 18),
+    new THREE.CylinderGeometry(bh*0.4, bh*0.4, bh*1.0, 18),
     mat(RAL_5017));
   drum.rotation.x = Math.PI/2;
   drum.position.set(0, yTrolley, 0); g.add(drum);

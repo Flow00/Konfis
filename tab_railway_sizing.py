@@ -2280,7 +2280,13 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
     caissonGeo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
     caissonGeo.setIndex(indices);
     caissonGeo.computeVertexNormals();
-    const caisson = new THREE.Mesh(caissonGeo, mat(ABUS));
+    // DoubleSide : on rend les faces des deux côtés. Évite que le caisson
+    // paraisse transparent si certaines normales sont mal orientées (effet
+    // qu'on a observé avec FrontSide par défaut).
+    const caissonMat = new THREE.MeshLambertMaterial({
+      color: ABUS, side: THREE.DoubleSide,
+    });
+    const caisson = new THREE.Mesh(caissonGeo, caissonMat);
     caisson.position.set(0, yGird, 0); g.add(caisson);
   } else {
     // ── SUSPENDU : box rectangulaire avec dépassement 300 mm de chaque côté

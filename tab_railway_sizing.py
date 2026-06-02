@@ -2233,122 +2233,58 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // SUSPENDU : caisson rectangulaire, sans chanfreins. Dépassement 300 mm
   //   de chaque côté → longueur = span + 600.
   if (!hung) {
-    // ── POSÉ : caisson hexagonal vu de profil, fait d'assemblages simples ─
-    // Au lieu d'une BufferGeometry hexagonale (winding fragile), on assemble :
-    //   • Box basse : partie du caisson au niveau du sommier — pleine longueur.
-    //   • Box haute : partie qui dépasse le sommier — raccourcie aux 2 bouts.
-    //   • 2 prismes triangulaires : transition 45° entre les 2 niveaux.
-    // Avantage : chaque morceau utilise BoxGeometry → normales toujours OK.
+    // ── POSÉ : caisson hexagonal en UNE SEULE ExtrudeGeometry ─────────────
+    // Approche fiable : on dessine la section hexagonale (vue de profil)
+    // dans un THREE.Shape 2D (plan X-Y de Three.js), puis on extrude selon Z.
+    // Three.js calcule les normales lui-même → pas de problème de winding.
+    //
+    // Mapping :
+    //   Shape-X (le X du Shape 2D)  → notre Z (longueur span)
+    //   Shape-Y (le Y du Shape 2D)  → notre Y (hauteur)
+    //   Extrusion (Three.js Z)      → notre X (largeur caisson)
+    //
+    // Section hexagonale (vue de profil, plan Y-Z) :
+    //
+    //         4───────5         ← arête supérieure (Y=+gh/2), raccourcie en Z
+    //        ╱         ╲
+    //       3           6        ← début chanfreins (Y=+gh/2−ch45)
+    //       │           │
+    //       │           │
+    //       1───────────2        ← arête inférieure (Y=−gh/2), pleine longueur
+    //   ←── longueur span ──→
+    //
     const ch45 = Math.max(0, Math.min(gh - somH, span * 0.15));
-    // Longueur en Z : s'arrête au nu intérieur des sommiers
-    const lenLow = span - somW;                  // partie basse, longueur
-    const lenHi  = Math.max(50, lenLow - 2*ch45); // partie haute, raccourcie
+    const lenLow = span - somW;                  // longueur de la base
+    const halfLow = lenLow / 2;
+    const halfHi  = halfLow - ch45;              // demi-longueur du dessus
 
-    // Partie basse (profondeur somH)
-    const lowH = (gh - ch45);                    // partie basse = gh - ch45
-    const yLow = -gh/2 + lowH/2;                 // centre vertical
-    const lowBox = box(gw, lowH, lenLow, ABUS);
-    lowBox.position.set(0, yGird + yLow, 0); g.add(lowBox);
+    const shape = new THREE.Shape();
+    // Tracé dans le sens anti-horaire (Three.js exige cet ordre pour extrusion)
+    shape.moveTo(-halfLow, -gh/2);                              // bas-gauche
+    shape.lineTo( halfLow, -gh/2);                              // bas-droite
+    shape.lineTo( halfLow,  gh/2 - ch45);                       // début chanfrein droit
+    shape.lineTo( halfHi,   gh/2);                              // haut-droite
+    shape.lineTo(-halfHi,   gh/2);                              // haut-gauche
+    shape.lineTo(-halfLow,  gh/2 - ch45);                       // début chanfrein gauche
+    shape.lineTo(-halfLow, -gh/2);                              // retour
 
-    // Partie haute (au-dessus, plus courte)
-    if (ch45 > 0 && lenHi > 0) {
-      const yHi = +gh/2 - ch45/2;
-      const hiBox = box(gw, ch45, lenHi, ABUS);
-      hiBox.position.set(0, yGird + yHi, 0); g.add(hiBox);
-
-      // 2 prismes triangulaires aux extrémités (transition 45°)
-      // Géométrie du prisme côté sgnZ = +1 (le côté Z opposé est miroir) :
-      //   - Section triangulaire dans le plan Y-Z :
-      //       P0 = (yTop, zHi)  ← sommet haut, lié au coin de la box haute
-      //       P1 = (yMid, zHi)  ← coin intérieur (caché)
-      //       P2 = (yMid, zLo)  ← coin extérieur, lié à la fin de la box basse
-      //   - Extrudé sur l'épaisseur gw du caisson (en X).
-      //
-      //   Faces visibles (4) :
-      //     • Face latérale gauche  (x = -gw/2, normale = -X)
-      //     • Face latérale droite  (x = +gw/2, normale = +X)
-      //     • Pan oblique 45°       (normale = (+Y, +Z·sgnZ))
-      //     • Face inférieure       (y = yMid, normale = -Y)
-      //   (La face P0-P1 verticale, normale vers l'intérieur, n'est pas
-      //   rendue car cachée par la box haute → on l'omet pour éviter les
-      //   artefacts visuels.)
-      const yMidY = yGird + (+gh/2 - ch45);      // niveau de la transition
-      const yTopY = yGird + (+gh/2);             // sommet du caisson
-      [+1, -1].forEach(sgnZ=>{
-        const zHi = sgnZ * lenHi/2;              // côté intérieur (lié à la box haute)
-        const zLo = sgnZ * lenLow/2;             // côté extérieur (lié à la box basse)
-        // 6 sommets : triangle × 2 plans X.
-        // Indices : 0,1,2 = flanc x=-gw/2 ; 3,4,5 = flanc x=+gw/2.
-        // 0=P0, 1=P1, 2=P2 sur le flanc gauche ; 3=P0, 4=P1, 5=P2 sur droite.
-        const verts = new Float32Array([
-          -gw/2, yTopY, zHi,    // 0 P0 gauche-haut-INT
-          -gw/2, yMidY, zHi,    // 1 P1 gauche-bas-INT
-          -gw/2, yMidY, zLo,    // 2 P2 gauche-bas-EXT
-          +gw/2, yTopY, zHi,    // 3 P0 droite-haut-INT
-          +gw/2, yMidY, zHi,    // 4 P1 droite-bas-INT
-          +gw/2, yMidY, zLo,    // 5 P2 droite-bas-EXT
-        ]);
-        // Triangles avec winding correct (anti-horaire vu depuis l'extérieur).
-        // Convention : (A, B, C) où (B-A)×(C-A) pointe vers l'extérieur.
-        //
-        // Face gauche (x=-gw/2, normale=-X) : vue depuis -X (regard vers +X),
-        // les axes Y monte, Z augmente avec sgnZ. Anti-horaire vu de -X :
-        //   sgnZ=+1 : P0(top,zHi) → P1(mid,zHi) → P2(mid,zLo) → P0 — horaire si zHi<zLo
-        //   Plus simple : tester et inverser si besoin.
-        // Pour sgnZ=+1, zLo > zHi (P2 plus loin que P1 en Z+).
-        // Vu de -X : Z vers gauche, Y vers haut. P0 haut-droite, P1 bas-droite,
-        // P2 bas-extrême-droite. Sens trigo (anti-horaire) : P0→P1→P2.
-        // Donc (0,1,2) — mais c'est seulement vrai si sgnZ=+1 (P2 à droite de P1).
-        // Pour sgnZ=-1, P2 est à gauche de P1, donc l'ordre s'inverse → (0,2,1).
-        //
-        // Face droite (x=+gw/2, normale=+X) : miroir → (3,5,4) pour sgnZ=+1, (3,4,5) pour sgnZ=-1.
-        //
-        // Pan oblique : 4 sommets P0,P2 (gauche+droite). Normale dépend de sgnZ.
-        // Pour sgnZ=+1, le pan descend de P0(zHi=plus petit Z) à P2(zLo=plus grand Z),
-        // donc la normale a une composante +Z et +Y. Vu depuis (+Y, +Z) :
-        //   sommets ordre anti-horaire : P0_gauche(0) → P0_droite(3) → P2_droite(5) → P2_gauche(2)
-        //   Triangulé : (0,3,5) et (0,5,2)
-        // Pour sgnZ=-1, miroir → (0,2,5) et (0,5,3)
-        //
-        // Face inférieure (y=yMid, normale=-Y) : entre P1 et P2 sur les 2 flancs.
-        // P1_gauche(1), P2_gauche(2), P1_droite(4), P2_droite(5).
-        // Vu de -Y (regard vers +Y), X vers droite, Z selon sgnZ.
-        // Pour sgnZ=+1 (Z augmente vers extérieur) :
-        //   Anti-horaire vu de -Y : 1(x-,z-) → 2(x-,z+) → 5(x+,z+) → 4(x+,z-)
-        //   Triangulé : (1,2,5) et (1,5,4)
-        // Pour sgnZ=-1 (Z diminue vers extérieur) : on inverse en Z → (1,4,5) et (1,5,2)
-        const idx = sgnZ > 0 ? [
-          // Face gauche (x=-gw/2, normale -X)
-          0, 1, 2,
-          // Face droite (x=+gw/2, normale +X)
-          3, 5, 4,
-          // Pan oblique 45° (normale (+Y, +Z))
-          0, 3, 5,  0, 5, 2,
-          // Face inférieure (normale -Y)
-          1, 2, 5,  1, 5, 4,
-        ] : [
-          // sgnZ=-1 : on inverse les ordres en Z
-          0, 2, 1,
-          3, 4, 5,
-          0, 2, 5,  0, 5, 3,
-          1, 4, 5,  1, 5, 2,
-        ];
-        const geo = new THREE.BufferGeometry();
-        geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
-        geo.setIndex(idx);
-        geo.computeVertexNormals();
-        // DoubleSide pour garantir que toutes les faces du prisme sont visibles
-        // quelle que soit l'orientation des normales (ça nous évite un coin
-        // invisible sur les versions précédentes).
-        // flatShading : calcule une normale par face (pas par sommet) → ombrage
-        // net et propre, sans gradient bizarre dû à computeVertexNormals.
-        const prismMat = new THREE.MeshLambertMaterial({
-          color: ABUS, side: THREE.DoubleSide, flatShading: true,
-        });
-        const m = new THREE.Mesh(geo, prismMat);
-        g.add(m);
-      });
-    }
+    const caissonGeo = new THREE.ExtrudeGeometry(shape, {
+      depth: gw,                                // épaisseur en Three-Z = notre X
+      bevelEnabled: false,
+    });
+    // ExtrudeGeometry extrude depuis Z=0 vers Z=+gw. On veut centré sur 0 en X
+    // (notre largeur). Vue dans Three.js : géo dans plan X-Y avec extrusion Z.
+    // Pour que ça soit centré sur Three-Z=0, on translate.
+    caissonGeo.translate(0, 0, -gw/2);
+    // Maintenant on doit "remapper" les axes Three.js vers les nôtres :
+    //   Three-X = notre Z (longueur span)
+    //   Three-Y = notre Y (hauteur)  ← déjà correct
+    //   Three-Z = notre X (largeur)
+    // Donc il faut échanger Three-X ↔ Three-Z. Une rotation de π/2 autour de Y
+    // fait exactement cela.
+    caissonGeo.rotateY(Math.PI / 2);
+    const caisson = new THREE.Mesh(caissonGeo, mat(ABUS));
+    caisson.position.set(0, yGird, 0); g.add(caisson);
   } else {
     // ── SUSPENDU : box rectangulaire avec dépassement 300 mm de chaque côté
     const caisson = box(gw, gh, span + 2*SUSP_OVER, ABUS);
@@ -2412,9 +2348,10 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // On veut que le HAUT du trolley arrive à mi-hauteur du caisson.
   // → yTrolley (centre) = yGird (centre caisson) - trolH/2
   // → bas du trolley à yGird - trolH ; haut à yGird.
-  // Haut du trolley au BAS du caisson (palan pend sous la poutre, ne masque
-  // pas le sticker ABUS qui est centré sur le caisson).
-  const yTrolley = yGird - gh*0.5 - trolH*0.5;
+  // Haut du trolley nettement SOUS le bas du caisson, pour ne pas masquer
+  // le sticker ABUS qui est centré sur le caisson.
+  // → centre trolley à yGird - gh/2 - bh*0.3 - trolH/2
+  const yTrolley = yGird - gh*0.5 - bh*0.3 - trolH*0.5;
   const trolley = box(gw*1.6, trolH, bh*1.4, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(

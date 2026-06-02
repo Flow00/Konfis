@@ -2340,8 +2340,10 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
         // DoubleSide pour garantir que toutes les faces du prisme sont visibles
         // quelle que soit l'orientation des normales (ça nous évite un coin
         // invisible sur les versions précédentes).
+        // flatShading : calcule une normale par face (pas par sommet) → ombrage
+        // net et propre, sans gradient bizarre dû à computeVertexNormals.
         const prismMat = new THREE.MeshLambertMaterial({
-          color: ABUS, side: THREE.DoubleSide,
+          color: ABUS, side: THREE.DoubleSide, flatShading: true,
         });
         const m = new THREE.Mesh(geo, prismMat);
         g.add(m);
@@ -2410,7 +2412,9 @@ function abusCrane(span, yRailTop, bh, hung, carriage, xc, rv){
   // On veut que le HAUT du trolley arrive à mi-hauteur du caisson.
   // → yTrolley (centre) = yGird (centre caisson) - trolH/2
   // → bas du trolley à yGird - trolH ; haut à yGird.
-  const yTrolley = yGird - trolH*0.5;
+  // Haut du trolley au BAS du caisson (palan pend sous la poutre, ne masque
+  // pas le sticker ABUS qui est centré sur le caisson).
+  const yTrolley = yGird - gh*0.5 - trolH*0.5;
   const trolley = box(gw*1.6, trolH, bh*1.4, RAL_5017);
   trolley.position.set(0, yTrolley, 0); g.add(trolley);
   const drum = new THREE.Mesh(

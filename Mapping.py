@@ -113,6 +113,7 @@ def map_abbreviation():
         ("Guirlande complète","ALIM",False),
         ("Alimentation spécifique","ALIM",False),
         ("Enrouleur","ALIM",False),
+        ("Plateforme élévatrice","PLA",True),
         
     ]
 

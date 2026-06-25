@@ -114,6 +114,7 @@ def map_abbreviation():
         ("Alimentation spécifique","ALIM",False),
         ("Enrouleur","ALIM",False),
         ("Plateforme élévatrice","PLA",True),
+        ("Réception","REC",False),
         
     ]
 
